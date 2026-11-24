@@ -260,3 +260,39 @@ table.evidence td, table.evidence th { white-space: nowrap; }
 table.evidence td:first-child { white-space: normal; }
 .method ul { padding-left: 20px; }
 .method li { margin-bottom: 6px; }
+
+/* radar-4: rank ranges, anchors, matrix */
+.rankrange { color: var(--dim); font-size: 11px; }
+.rankrange-lg {
+  display: inline-block;
+  margin: 0 4px;
+  padding: 1px 8px;
+  border-radius: 99px;
+  background: #1c2233;
+  color: var(--blue);
+  font-size: 12px;
+  font-weight: 700;
+  vertical-align: 3px;
+}
+.samecat {
+  display: inline-block;
+  margin-left: 6px;
+  padding: 0 6px;
+  border-radius: 99px;
+  background: #12241d;
+  color: #3fb68b;
+  font-size: 10px;
+  font-weight: 700;
+  vertical-align: 1px;
+}
+.matrix-svg { width: 100%; height: auto; background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); }
+.matrix-svg .cross { stroke: #3a4457; stroke-width: 1; stroke-dasharray: 5 4; }
+.matrix-svg .tick { stroke: var(--dim); stroke-width: 1; }
+.matrix-svg .axis { fill: var(--muted); font-size: 12px; font-family: inherit; }
+.matrix-svg .qlab { fill: var(--dim); font-size: 13px; font-weight: 600; font-family: inherit; }
+.matrix-svg .dot { cursor: pointer; opacity: 0.85; }
+.matrix-svg .dot:hover { opacity: 1; stroke: #fff; stroke-width: 1.5; }
+.matrix-svg .dotlabel { fill: var(--text); font-size: 12px; font-weight: 600; font-family: inherit; }
+.legend { display: flex; flex-wrap: wrap; gap: 4px 16px; margin-top: 10px; font-size: 12px; color: var(--muted); }
+.legend .lg i { display: inline-block; width: 9px; height: 9px; border-radius: 2px; margin-right: 5px; vertical-align: -1px; }
+.legend .muted { color: var(--muted); }

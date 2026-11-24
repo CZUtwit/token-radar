@@ -1,4 +1,4 @@
-// Token Launch Radar — the model, radar-3 (token-radar-01).
+// Token Launch Radar — the model, radar-4 (token-radar-01).
 //
 // One sealed DefiLlama snapshot in, one ranked board out. The board ranks every
 // pre-token protocol the snapshot can rank: the whole watchlist, plus every
@@ -13,10 +13,11 @@
 //   log10(market cap) = a + b * log10(TVL) + c * growth
 //
 // Every candidate term — age, chain count, a category effect, and a shuffled
-// control term that must not help — is tested held-out two ways (leave-one-out
-// and walk-forward: earlier listings price later ones). A term enters the
-// model only when it lowers the combined held-out miss by at least 1%
-// without raising either test by more than 2%. Age, chains and the category
+// control term that must not help — is tested held-out three ways (leave-one-out,
+// ten-fold, and walk-forward: earlier listings price later ones). A term enters
+// the model only when it lowers the combined leave-one-out and walk-forward
+// miss by at least 1% without raising either test by more than 2%; the
+// ten-fold miss is reported as a third check. Age, chains and the category
 // effect all failed; the fitted model keeps size and growth only, and the
 // board shows the whole ablation so the reader can see what was tried and
 // what was dropped. A shuffled control term is tested the same way: it must
@@ -25,18 +26,29 @@
 // The odds model is a logistic regression on every protocol the rules do not
 // exclude, fitted to whether it records a token, from log TVL, log age, the
 // category's shrunk token rate and 7-day growth. It is scored by Brier score
-// against the base rate, in-sample and walk-forward.
+// against the base rate, in-sample, ten-fold and walk-forward, and the term
+// selection itself is checked nested: the rule picks its terms on the older
+// half and is scored on the newer half, against fitting every term and
+// against the base rate alone.
 //
-//   if it launches = 10 ^ fitted log market cap, with a P25-P75 band from the
-//                      leave-one-out residuals
+//   if it launches = 10 ^ fitted log market cap, with a P25-P75 band priced
+//                      per category from the leave-one-out residuals of that
+//                      category's comparables, shrunk toward the global band
 //   implied value   = if it launches x token odds        (the expected value)
-//   rank            = by implied value, highest first
+//   rank            = by implied value, highest first, with a rank range from
+//                     the bands: how far the row could move if every band
+//                     landed at its own end
 //
 // Each farm plan is costed, not just listed. The board states its assumptions:
 // farmers share 5% of the launch value; one farming wallet per $100k of TVL
 // (at least 1000 wallets); gas and a 4% annual opportunity cost on the deposit.
 // A row is FARM when its net stays positive at the low end of its band,
 // MARGINAL when it pays at the point estimate only, SKIP when it does not pay.
+// Every row also shows its net at three deposit tiers ($50 / $150 / $500) and
+// the largest deposit that still pays, plus a week-by-week timeline.
+//
+// Every row names its three nearest traded comparables — the anchors its
+// launch value is priced against, same category first, then nearest by size.
 //
 // Everything the dashboard claims — the ablation, the Brier scores, the band
 // honesty, the 758-protocol ledger, the checksum — is computed here from the
@@ -114,7 +126,7 @@ export const MODEL: ModelConstants = {
 };
 
 /** The model's version label, shown on the dashboard. */
-export const MODEL_VERSION = 'radar-3';
+export const MODEL_VERSION = 'radar-4';
 
 /** How many live-token protocols the Live view carries, by market cap. */
 export const LIVE_ROWS = 24;
@@ -130,6 +142,7 @@ export interface FarmStep {
 export interface AblationRow {
   term: string;
   loo_miss: number;
+  kfold_miss: number;
   wf_miss: number;
   verdict: 'kept' | 'not kept' | 'baseline' | 'control';
 }
@@ -138,8 +151,17 @@ export interface AblationRow {
 export interface OddsAblationRow {
   term: string;
   brier: number;
+  kfold_brier: number;
   wf_brier: number;
   verdict: 'kept' | 'not kept' | 'baseline';
+}
+
+/** One category's P25-P75 band factors, from its own comparables. */
+export interface CategoryBand {
+  category: string;
+  n: number;
+  p25: number;
+  p75: number;
 }
 
 /** The fitted value model, with its evidence. */
@@ -157,6 +179,12 @@ export interface ValueEvidence {
   band_p75: number;
   band_p10: number;
   band_p90: number;
+  /** Ten-fold median miss of the fitted model. */
+  kfold_miss: number;
+  /** Per-category P25-P75 band factors, shrunk toward the global band. */
+  band_by_category: CategoryBand[];
+  /** Share of comparables whose real cap lands inside their own category band. */
+  honesty_cat_band: number;
   /** Share of comparables whose real cap lands inside the printed band. */
   honesty_p25_p75: number;
   honesty_p10_p90: number;
@@ -170,8 +198,17 @@ export interface OddsEvidence {
   base_rate: number;
   base_brier: number;
   brier: number;
+  kfold_brier: number;
   wf_brier: number;
   wf_base_brier: number;
+  /** Walk-forward calibration: what the newer half actually did, against the mean odds it was given. */
+  calibration_test_n: number;
+  calibration_test_rate: number;
+  calibration_mean_pred: number;
+  /** Nested check: the rule picks its terms on the older half, scored on the newer half. */
+  nested_rule_brier: number;
+  nested_all_brier: number;
+  nested_base_brier: number;
   /** Standardized logistic weights, in feature order. */
   weights: number[];
   ablation: OddsAblationRow[];
@@ -193,6 +230,9 @@ export interface ModelBreakdown {
   if_launches_usd: number;
   band_low_usd: number;
   band_high_usd: number;
+  /** The per-category band factors this row's band was priced with. */
+  band_p25_factor: number;
+  band_p75_factor: number;
   odds: number;
   odds_log_tvl: number;
   odds_log_age: number;
@@ -206,11 +246,32 @@ export interface ModelBreakdown {
   opportunity_usd: number;
   hours: number;
   age_days: number | null;
+  hold_days: number;
+}
+
+/** One traded comparable a row's launch value is priced against. */
+export interface Anchor {
+  slug: string;
+  name: string;
+  tvl_usd: number;
+  mcap_usd: number;
+  mcap_tvl: number;
+  same_category: boolean;
+}
+
+/** One deposit tier's farm economics. */
+export interface FarmTier {
+  deposit_usd: number;
+  net_usd: number;
+  net_hour_usd: number;
+  verdict: 'FARM' | 'MARGINAL' | 'SKIP';
 }
 
 /** One row of board.json. */
 export interface BoardRow {
   rank: number;
+  rank_low: number;
+  rank_high: number;
   slug: string;
   name: string;
   category: string | null;
@@ -229,6 +290,10 @@ export interface BoardRow {
   net_usd: number;
   net_hour_usd: number;
   breakeven_usd: number;
+  /** The largest deposit that still pays, at the point estimate; null when no deposit pays. */
+  max_viable_deposit_usd: number | null;
+  tiers: FarmTier[];
+  anchors: Anchor[];
   model: ModelBreakdown;
   farm_steps: string[];
 }
@@ -513,6 +578,65 @@ function wfMissFlat(comps: SnapshotProtocol[]): number {
   return median(test.map((p) => missRatio(p.tvl_usd * flat, p.mcap_usd!)));
 }
 
+/**
+ * Ten-fold median miss for one feature set. Folds are deterministic: the
+ * comparables are sorted by slug and dealt round-robin, so the same fold
+ * holds the same protocols on every run. Each fold is priced by a model
+ * fitted on the other nine.
+ */
+function kfoldMiss(comps: SnapshotProtocol[], feat: FeatureFn, k = 10): number {
+  const sorted = [...comps].sort((a, b) => (a.slug < b.slug ? -1 : 1));
+  const misses: number[] = [];
+  for (let f = 0; f < k; f++) {
+    const test = sorted.filter((_, i) => i % k === f);
+    const train = sorted.filter((_, i) => i % k !== f);
+    const beta = ols(train.map(feat), train.map((p) => Math.log10(p.mcap_usd!)));
+    if (beta === null) return NaN;
+    for (const p of test) misses.push(missRatio(10 ** feat(p).reduce((s, x, j) => s + x * beta[j]!, 0), p.mcap_usd!));
+  }
+  return median(misses);
+}
+
+/** Ten-fold median miss for the flat median multiple. */
+function kfoldMissFlat(comps: SnapshotProtocol[], k = 10): number {
+  const sorted = [...comps].sort((a, b) => (a.slug < b.slug ? -1 : 1));
+  const misses: number[] = [];
+  for (let f = 0; f < k; f++) {
+    const test = sorted.filter((_, i) => i % k === f);
+    const train = sorted.filter((_, i) => i % k !== f);
+    const flat = median(train.map((p) => marketMultiple(p)!));
+    for (const p of test) misses.push(missRatio(p.tvl_usd * flat, p.mcap_usd!));
+  }
+  return median(misses);
+}
+
+/** Ten-fold median miss with a shrunk category effect on the residuals. */
+function kfoldMissCategory(comps: SnapshotProtocol[], shrinkK: number, k = 10): number {
+  const sorted = [...comps].sort((a, b) => (a.slug < b.slug ? -1 : 1));
+  const misses: number[] = [];
+  for (let f = 0; f < k; f++) {
+    const test = sorted.filter((_, i) => i % k === f);
+    const train = sorted.filter((_, i) => i % k !== f);
+    const beta = ols(train.map(VALUE_FEATURES.size), train.map((p) => Math.log10(p.mcap_usd!)));
+    if (beta === null) return NaN;
+    const byCat = new Map<string, number[]>();
+    train.forEach((p) => {
+      const r = Math.log10(p.mcap_usd!) - (beta[0]! + beta[1]! * Math.log10(p.tvl_usd));
+      const c = p.category ?? 'Uncategorized';
+      const list = byCat.get(c) ?? [];
+      list.push(r);
+      byCat.set(c, list);
+    });
+    for (const p of test) {
+      const c = p.category ?? 'Uncategorized';
+      const list = byCat.get(c) ?? [];
+      const effect = list.length === 0 ? 0 : (list.reduce((s, v) => s + v, 0) / list.length) * (list.length / (list.length + shrinkK));
+      misses.push(missRatio(10 ** (beta[0]! + beta[1]! * Math.log10(p.tvl_usd) + effect), p.mcap_usd!));
+    }
+  }
+  return median(misses);
+}
+
 /** Leave-one-out median miss with a shrunk category effect on the residuals. */
 function looMissCategory(comps: SnapshotProtocol[], shrinkK: number): number {
   const misses: number[] = [];
@@ -562,7 +686,13 @@ function wfMissCategory(comps: SnapshotProtocol[], shrinkK: number): number {
   );
 }
 /** The fitted value model and every test it survived — and the ones it did not. */
-export function fitValueModel(snapshot: Snapshot): { evidence: ValueEvidence; predict: (p: SnapshotProtocol) => number; looResiduals: number[] } {
+export function fitValueModel(snapshot: Snapshot): {
+  evidence: ValueEvidence;
+  predict: (p: SnapshotProtocol) => number;
+  looResiduals: number[];
+  /** Per-category P25-P75 factors, shrunk toward the global band. */
+  categoryBands: Map<string, { p25: number; p75: number; n: number }>;
+} {
   const comps = cleanComps(snapshot);
   const medianAge = median(comps.map((p) => ageDays(snapshot.as_of, p.listed_at)).filter((a): a is number => a !== null));
   const logAge = (p: SnapshotProtocol): number => Math.log10((ageDays(snapshot.as_of, p.listed_at) ?? medianAge) + 1);
@@ -570,22 +700,27 @@ export function fitValueModel(snapshot: Snapshot): { evidence: ValueEvidence; pr
   const bySlug = [...comps].sort((a, b) => (a.slug < b.slug ? -1 : 1));
   const shuffledGrowth = new Map(bySlug.map((p, i) => [p.slug, growthFrac(bySlug[(i + 1) % bySlug.length]!, MODEL)]));
 
-  // The ablation: each candidate term, held-out both ways. A term enters the
-  // model only when it lowers the combined held-out miss by at least 1%
-  // without raising either test by more than 2%, judged against the model so
-  // far. The selection below runs that rule; the table reports the same
-  // numbers. The 1% floor matters: with 91 comparables, a smaller move is
-  // noise, and the shuffled control term is the proof — it improves one test
-  // by chance and must still fail the rule.
+  // The ablation: each candidate term, held-out three ways. A term enters the
+  // model only when it lowers the combined leave-one-out and walk-forward
+  // miss by at least 1% without raising either test by more than 2%, judged
+  // against the model so far; the ten-fold miss is reported for every term
+  // as a third check, not a selection input, so the rule stays the one the
+  // board has always used. The selection below runs that rule; the table
+  // reports the same numbers. The 1% floor matters: with 91 comparables, a
+  // smaller move is noise, and the shuffled control term is the proof — it
+  // improves one test by chance and must still fail the rule.
   const flatLoo = looMissFlat(comps);
+  const flatKf = kfoldMissFlat(comps);
   const flatWf = wfMissFlat(comps);
   const sizeLoo = looMiss(comps, VALUE_FEATURES.size);
+  const sizeKf = kfoldMiss(comps, VALUE_FEATURES.size);
   const sizeWf = wfMiss(comps, VALUE_FEATURES.size);
   const keeps = (loo: number, wf: number, baseLoo: number, baseWf: number): boolean =>
     loo + wf < (baseLoo + baseWf) * 0.99 && loo <= baseLoo * 1.02 && wf <= baseWf * 1.02;
 
   const growthFeat: FeatureFn = (p) => [1, Math.log10(p.tvl_usd), growthFrac(p, MODEL)];
   const growthLoo = looMiss(comps, growthFeat);
+  const growthKf = kfoldMiss(comps, growthFeat);
   const growthWf = wfMiss(comps, growthFeat);
   const growthKept = keeps(growthLoo, growthWf, sizeLoo, sizeWf);
 
@@ -594,6 +729,7 @@ export function fitValueModel(snapshot: Snapshot): { evidence: ValueEvidence; pr
   const baseWf = growthKept ? growthWf : sizeWf;
   const ageFeat: FeatureFn = (p) => [...baseFeat(p), logAge(p)];
   const ageLoo = looMiss(comps, ageFeat);
+  const ageKf = kfoldMiss(comps, ageFeat);
   const ageWf = wfMiss(comps, ageFeat);
   const ageKept = keeps(ageLoo, ageWf, baseLoo, baseWf);
 
@@ -602,18 +738,22 @@ export function fitValueModel(snapshot: Snapshot): { evidence: ValueEvidence; pr
   const wf2 = ageKept ? ageWf : baseWf;
   const chainsFeat: FeatureFn = (p) => [...feat2(p), logChains(p)];
   const chainsLoo = looMiss(comps, chainsFeat);
+  const chainsKf = kfoldMiss(comps, chainsFeat);
   const chainsWf = wfMiss(comps, chainsFeat);
   const chainsKept = keeps(chainsLoo, chainsWf, loo2, wf2);
 
   const feat = chainsKept ? chainsFeat : feat2;
   const allFeat: FeatureFn = (p) => [1, Math.log10(p.tvl_usd), growthFrac(p, MODEL), logAge(p), logChains(p)];
   const allLoo = looMiss(comps, allFeat);
+  const allKf = kfoldMiss(comps, allFeat);
   const allWf = wfMiss(comps, allFeat);
   const catLoo = looMissCategory(comps, 3);
+  const catKf = kfoldMissCategory(comps, 3);
   const catWf = wfMissCategory(comps, 3);
   const catKept = keeps(catLoo, catWf, sizeLoo, sizeWf);
   const controlFeat: FeatureFn = (p) => [...feat(p), shuffledGrowth.get(p.slug)!];
   const controlLoo = looMiss(comps, controlFeat);
+  const controlKf = kfoldMiss(comps, controlFeat);
   const controlWf = wfMiss(comps, controlFeat);
 
   const beta = ols(comps.map(feat), comps.map((p) => Math.log10(p.mcap_usd!)));
@@ -622,17 +762,49 @@ export function fitValueModel(snapshot: Snapshot): { evidence: ValueEvidence; pr
 
   // Leave-one-out residuals under the fitted model, for the band and its honesty.
   const looResiduals: number[] = [];
+  const looByCat = new Map<string, number[]>();
   for (let i = 0; i < comps.length; i++) {
     const rest = comps.filter((_, j) => j !== i);
     const b = ols(rest.map(feat), rest.map((p) => Math.log10(p.mcap_usd!)));
     if (b === null) continue;
-    looResiduals.push(Math.log10(comps[i]!.mcap_usd!) - feat(comps[i]!).reduce((s, x, k) => s + x * b[k]!, 0));
+    const r = Math.log10(comps[i]!.mcap_usd!) - feat(comps[i]!).reduce((s, x, k) => s + x * b[k]!, 0);
+    looResiduals.push(r);
+    const c = comps[i]!.category ?? 'Uncategorized';
+    const list = looByCat.get(c) ?? [];
+    list.push(r);
+    looByCat.set(c, list);
   }
   const bandP25 = 10 ** quantile(looResiduals, 0.25);
   const bandP75 = 10 ** quantile(looResiduals, 0.75);
   const bandP10 = 10 ** quantile(looResiduals, 0.1);
   const bandP90 = 10 ** quantile(looResiduals, 0.9);
   const inside = (lo: number, hi: number): number => looResiduals.filter((r) => r >= Math.log10(lo) && r <= Math.log10(hi)).length / looResiduals.length;
+
+  // Per-category bands: each category's own P25-P75 from its comparables'
+  // residuals, shrunk toward the global band in log space. A category with
+  // few comparables mostly keeps the global band; a well-stocked one mostly
+  // keeps its own. Categories with no comparables fall back to the global
+  // band at row time.
+  const g25 = Math.log10(bandP25);
+  const g75 = Math.log10(bandP75);
+  const categoryBands = new Map<string, { p25: number; p75: number; n: number }>();
+  const bandByCategory: CategoryBand[] = [];
+  for (const [c, list] of [...looByCat.entries()].sort((a, b) => (a[0] < b[0] ? -1 : 1))) {
+    const w = list.length / (list.length + 3);
+    const p25 = 10 ** (w * quantile(list, 0.25) + (1 - w) * g25);
+    const p75 = 10 ** (w * quantile(list, 0.75) + (1 - w) * g75);
+    categoryBands.set(c, { p25, p75, n: list.length });
+    bandByCategory.push({ category: c, n: list.length, p25: round4(p25), p75: round4(p75) });
+  }
+  const catBandOf = (p: SnapshotProtocol): { p25: number; p75: number } =>
+    categoryBands.get(p.category ?? 'Uncategorized') ?? { p25: bandP25, p75: bandP75 };
+  // Honesty of the category bands, on the same leave-one-out residuals.
+  let insideCatCount = 0;
+  for (const [c, list] of looByCat.entries()) {
+    const b = categoryBands.get(c)!;
+    insideCatCount += list.filter((r) => r >= Math.log10(b.p25) && r <= Math.log10(b.p75)).length;
+  }
+  const honestyCatBand = insideCatCount / looResiduals.length;
 
   const residuals = comps.map((p) => Math.log10(p.mcap_usd!) - predict(p));
   const residualSd = Math.sqrt(residuals.reduce((s, r) => s + r * r, 0) / residuals.length);
@@ -649,20 +821,23 @@ export function fitValueModel(snapshot: Snapshot): { evidence: ValueEvidence; pr
     band_p75: round4(bandP75),
     band_p10: round4(bandP10),
     band_p90: round4(bandP90),
+    kfold_miss: round2(kfoldMiss(comps, feat)),
+    band_by_category: bandByCategory,
+    honesty_cat_band: round4(honestyCatBand),
     honesty_p25_p75: round4(inside(bandP25, bandP75)),
     honesty_p10_p90: round4(inside(bandP10, bandP90)),
     ablation: [
-      { term: 'flat median multiple', loo_miss: round2(flatLoo), wf_miss: round2(flatWf), verdict: 'baseline' },
-      { term: '+ size curve, in TVL', loo_miss: round2(sizeLoo), wf_miss: round2(sizeWf), verdict: 'kept' },
-      { term: '+ 7-day TVL growth', loo_miss: round2(growthLoo), wf_miss: round2(growthWf), verdict: growthKept ? 'kept' : 'not kept' },
-      { term: '+ age, years listed', loo_miss: round2(ageLoo), wf_miss: round2(ageWf), verdict: ageKept ? 'kept' : 'not kept' },
-      { term: '+ chain count', loo_miss: round2(chainsLoo), wf_miss: round2(chainsWf), verdict: chainsKept ? 'kept' : 'not kept' },
-      { term: '+ age + chains together', loo_miss: round2(allLoo), wf_miss: round2(allWf), verdict: 'not kept' },
-      { term: '+ category effect, shrunk', loo_miss: round2(catLoo), wf_miss: round2(catWf), verdict: catKept ? 'kept' : 'not kept' },
-      { term: '+ control: shuffled growth', loo_miss: round2(controlLoo), wf_miss: round2(controlWf), verdict: 'control' },
+      { term: 'flat median multiple', loo_miss: round2(flatLoo), kfold_miss: round2(flatKf), wf_miss: round2(flatWf), verdict: 'baseline' },
+      { term: '+ size curve, in TVL', loo_miss: round2(sizeLoo), kfold_miss: round2(sizeKf), wf_miss: round2(sizeWf), verdict: 'kept' },
+      { term: '+ 7-day TVL growth', loo_miss: round2(growthLoo), kfold_miss: round2(growthKf), wf_miss: round2(growthWf), verdict: growthKept ? 'kept' : 'not kept' },
+      { term: '+ age, years listed', loo_miss: round2(ageLoo), kfold_miss: round2(ageKf), wf_miss: round2(ageWf), verdict: ageKept ? 'kept' : 'not kept' },
+      { term: '+ chain count', loo_miss: round2(chainsLoo), kfold_miss: round2(chainsKf), wf_miss: round2(chainsWf), verdict: chainsKept ? 'kept' : 'not kept' },
+      { term: '+ age + chains together', loo_miss: round2(allLoo), kfold_miss: round2(allKf), wf_miss: round2(allWf), verdict: 'not kept' },
+      { term: '+ category effect, shrunk', loo_miss: round2(catLoo), kfold_miss: round2(catKf), wf_miss: round2(catWf), verdict: catKept ? 'kept' : 'not kept' },
+      { term: '+ control: shuffled growth', loo_miss: round2(controlLoo), kfold_miss: round2(controlKf), wf_miss: round2(controlWf), verdict: 'control' },
     ],
   };
-  return { evidence, predict, looResiduals };
+  return { evidence, predict, looResiduals, categoryBands };
 }
 
 /** The fitted odds model and its evidence. */
@@ -707,32 +882,50 @@ export function fitOddsModel(
   const train = dated.slice(0, half);
   const test = dated.slice(half);
   const trainBase = train.filter((p) => !isPreToken(p)).length / train.length;
+  const testY = test.map((p) => (isPreToken(p) ? 0 : 1));
 
-  const score = (feat: FeatureFn): { brier: number; wf: number } => {
+  /** Ten-fold Brier score: each fold is scored by a model fitted on the other nine. */
+  const kfoldBrier = (pool: SnapshotProtocol[], poolY: number[], feat: FeatureFn, k = 10): number => {
+    const order = pool.map((p, i) => i).sort((a, b) => (pool[a]!.slug < pool[b]!.slug ? -1 : 1));
+    const pred: number[] = Array(pool.length).fill(0);
+    for (let f = 0; f < k; f++) {
+      const testIdx = order.filter((_, j) => j % k === f);
+      const trainIdx = order.filter((_, j) => j % k !== f);
+      const m = fitLogistic(trainIdx.map((i) => feat(pool[i]!)), trainIdx.map((i) => poolY[i]!));
+      for (const i of testIdx) pred[i] = predictLogistic(m, feat(pool[i]!));
+    }
+    return brierScore(pred, poolY);
+  };
+
+  const score = (feat: FeatureFn): { brier: number; kf: number; wf: number } => {
     const m = fitLogistic(peers.map(feat), y);
     const brier = brierScore(peers.map((p) => predictLogistic(m, feat(p))), y);
+    const kf = kfoldBrier(peers, y, feat);
     const m2 = fitLogistic(train.map(feat), train.map((p) => (isPreToken(p) ? 0 : 1)));
-    const wf = brierScore(test.map((p) => predictLogistic(m2, feat(p))), test.map((p) => (isPreToken(p) ? 0 : 1)));
-    return { brier, wf };
+    const wf = brierScore(test.map((p) => predictLogistic(m2, feat(p))), testY);
+    return { brier, kf, wf };
   };
   const baseBrier = brierScore(peers.map(() => baseRate), y);
-  const wfBaseBrier = brierScore(test.map(() => trainBase), test.map((p) => (isPreToken(p) ? 0 : 1)));
+  const wfBaseBrier = brierScore(test.map(() => trainBase), testY);
   // A term is kept when it lowers the combined Brier score by at least 1%
   // without raising either test by more than 2%, judged against the model
-  // so far.
+  // so far. The ten-fold Brier is reported for every term as a third check,
+  // not a selection input.
   const keeps = (b: number, w: number, baseB: number, baseW: number): boolean => b + w < (baseB + baseW) * 0.99 && b <= baseB * 1.02 && w <= baseW * 1.02;
 
   // Sequential selection: each term is tested against the model so far, and
   // the fitted model uses exactly the terms the rule kept.
   const keptTerms: { name: string; fn: (p: SnapshotProtocol) => number }[] = [];
-  const ablation: OddsAblationRow[] = [{ term: 'base rate, no terms', brier: round4(baseBrier), wf_brier: round4(wfBaseBrier), verdict: 'baseline' }];
+  const ablation: OddsAblationRow[] = [
+    { term: 'base rate, no terms', brier: round4(baseBrier), kfold_brier: round4(baseBrier), wf_brier: round4(wfBaseBrier), verdict: 'baseline' },
+  ];
   let curBrier = baseBrier;
   let curWf = wfBaseBrier;
   for (const t of terms) {
     const trial: FeatureFn = (p) => [1, ...keptTerms.map((k) => k.fn(p)), t.fn(p)];
     const s = score(trial);
     const kept = keeps(s.brier, s.wf, curBrier, curWf);
-    ablation.push({ term: `+ ${t.name}`, brier: round4(s.brier), wf_brier: round4(s.wf), verdict: kept ? 'kept' : 'not kept' });
+    ablation.push({ term: `+ ${t.name}`, brier: round4(s.brier), kfold_brier: round4(s.kf), wf_brier: round4(s.wf), verdict: kept ? 'kept' : 'not kept' });
     if (kept) {
       keptTerms.push(t);
       curBrier = s.brier;
@@ -741,6 +934,55 @@ export function fitOddsModel(
   }
   const feat: FeatureFn = (p) => [1, ...keptTerms.map((k) => k.fn(p))];
   const full = fitLogistic(peers.map(feat), y);
+  const kfoldFinal = kfoldBrier(peers, y, feat);
+
+  // Calibration on the newer half: what the later listings actually did,
+  // against the mean odds a model fitted only on the older half gave them.
+  const trainModel = fitLogistic(train.map(feat), train.map((p) => (isPreToken(p) ? 0 : 1)));
+  const testPred = test.map((p) => predictLogistic(trainModel, feat(p)));
+  const calibrationRate = testY.reduce((s, v) => s + v, 0) / testY.length;
+  const calibrationMean = testPred.reduce((s, v) => s + v, 0) / testPred.length;
+
+  // Nested check: the selection rule runs on the older half alone — its own
+  // in-sample Brier and an inner walk-forward split — then the terms it
+  // picks are fitted on the whole older half and scored on the newer half,
+  // against fitting every term and against the base rate alone. If picking
+  // terms on the older half still beats both on unseen listings, the
+  // selection is not overfitting the full sample.
+  const innerHalf = Math.floor(train.length / 2);
+  const innerTrain = train.slice(0, innerHalf);
+  const innerTest = train.slice(innerHalf);
+  const innerTrainY = innerTrain.map((p) => (isPreToken(p) ? 0 : 1));
+  const innerTestY = innerTest.map((p) => (isPreToken(p) ? 0 : 1));
+  const trainY = train.map((p) => (isPreToken(p) ? 0 : 1));
+  const innerBase = innerTrainY.reduce((s, v) => s + v, 0) / innerTrainY.length;
+  const innerScore = (f: FeatureFn): { brier: number; wf: number } => {
+    const m = fitLogistic(train.map(f), trainY);
+    const brier = brierScore(train.map((p) => predictLogistic(m, f(p))), trainY);
+    const m2 = fitLogistic(innerTrain.map(f), innerTrainY);
+    const wf = brierScore(innerTest.map((p) => predictLogistic(m2, f(p))), innerTestY);
+    return { brier, wf };
+  };
+  const innerBaseBrier = brierScore(train.map(() => trainBase), trainY);
+  const innerBaseWf = brierScore(innerTest.map(() => innerBase), innerTestY);
+  const nestedKept: { name: string; fn: (p: SnapshotProtocol) => number }[] = [];
+  let nB = innerBaseBrier;
+  let nW = innerBaseWf;
+  for (const t of terms) {
+    const trial: FeatureFn = (p) => [1, ...nestedKept.map((k) => k.fn(p)), t.fn(p)];
+    const s = innerScore(trial);
+    if (keeps(s.brier, s.wf, nB, nW)) {
+      nestedKept.push(t);
+      nB = s.brier;
+      nW = s.wf;
+    }
+  }
+  const nestedFeat: FeatureFn = (p) => [1, ...nestedKept.map((k) => k.fn(p))];
+  const nestedModel = fitLogistic(train.map(nestedFeat), trainY);
+  const nestedRuleBrier = brierScore(test.map((p) => predictLogistic(nestedModel, nestedFeat(p))), testY);
+  const allFeat: FeatureFn = (p) => [1, ...terms.map((t) => t.fn(p))];
+  const allModel = fitLogistic(train.map(allFeat), trainY);
+  const nestedAllBrier = brierScore(test.map((p) => predictLogistic(allModel, allFeat(p))), testY);
 
   const evidence: OddsEvidence = {
     peers: peers.length,
@@ -748,8 +990,15 @@ export function fitOddsModel(
     base_rate: round4(baseRate),
     base_brier: round4(baseBrier),
     brier: round4(curBrier),
+    kfold_brier: round4(kfoldFinal),
     wf_brier: round4(curWf),
     wf_base_brier: round4(wfBaseBrier),
+    calibration_test_n: test.length,
+    calibration_test_rate: round4(calibrationRate),
+    calibration_mean_pred: round4(calibrationMean),
+    nested_rule_brier: round4(nestedRuleBrier),
+    nested_all_brier: round4(nestedAllBrier),
+    nested_base_brier: round4(wfBaseBrier),
     weights: full.weights.map(round4),
     ablation,
   };
@@ -893,14 +1142,28 @@ function actionsFor(p: SnapshotProtocol, capital: number, chain: string, chain2:
   ];
 }
 
-/** A protocol's farm plan: six steps, the last carrying the costed verdict. */
-export function farmSteps(p: SnapshotProtocol, age: number | null, verdict: BoardRow['verdict'], net: number, breakeven: number, deposit: number): FarmStep[] {
+/** A protocol's farm plan: seven steps — the timeline and the deposit tiers included, the last carrying the costed verdict. */
+export function farmSteps(
+  p: SnapshotProtocol,
+  age: number | null,
+  verdict: BoardRow['verdict'],
+  net: number,
+  breakeven: number,
+  deposit: number,
+  tiers: FarmTier[],
+  maxViable: number | null,
+): FarmStep[] {
   const chain = chainOf(p);
   const chain2 = secondChainOf(p);
   const capital = capitalFor(p);
   const hold = holdDaysFor(age);
   const [first, second] = actionsFor(p, capital, chain, chain2);
   const gas = capital >= 150 ? 8 : 4;
+  const tierLine = tiers.map((t) => `$${t.deposit_usd}: ${t.net_usd >= 0 ? '+' : '−'}$${Math.abs(t.net_usd).toFixed(0)}`).join(', ');
+  const viableLine =
+    maxViable === null
+      ? 'No deposit size pays at the point estimate.'
+      : `Deposits above $${maxViable.toLocaleString('en-US')} stop paying: the opportunity cost eats the expected drop.`;
   const verdictLine =
     verdict === 'FARM'
       ? `This plan pays even at the low end of the band: expected net $${net.toFixed(0)} on a $${deposit} deposit after fees.`
@@ -921,12 +1184,17 @@ export function farmSteps(p: SnapshotProtocol, age: number | null, verdict: Boar
       time: '10 minutes a week',
     },
     {
+      text: `Timeline: week 1 sets the position up; weeks 2 to ${Math.max(2, Math.ceil(hold / 7))} keep one action a week; day ${hold} is the earliest the position has counted in more than one snapshot; check the points page then, and claim only from the link the protocol itself publishes.`,
+      cost: 'about $2 of gas a week',
+      time: `${hold} days in total`,
+    },
+    {
       text: `Hold the position for at least ${hold} days so the activity is counted in more than one snapshot.`,
       cost: `the $${capital} stays in the position`,
       time: `${hold} days`,
     },
     {
-      text: `${verdictLine} Before you withdraw, open ${p.name}'s own points or rewards page and claim only from the link it publishes.`,
+      text: `${verdictLine} Net by deposit tier — ${tierLine}. ${viableLine}`,
       cost: 'no fee to check, and never pay to claim',
       time: '10 minutes',
     },
@@ -953,12 +1221,31 @@ export function buildBoard(
 
   const watch = new Set(snapshot.watchlist);
   const ev = value.evidence;
+  const comps = cleanComps(snapshot);
+  const anchorPool = comps.map((c) => ({ c, logTvl: Math.log10(c.tvl_usd) }));
+
+  /** Net of fees at one deposit, at the point estimate and at the low end of the band. */
+  const netAt = (
+    deposit: number,
+    expectedDrop: number,
+    lowDrop: number,
+    hold: number,
+  ): { net: number; netLow: number; fees: number; opportunity: number } => {
+    const gas = deposit >= 150 ? model.gas_large : model.gas_small;
+    const fees = gas + model.gas_weekly * Math.ceil(hold / 7) + model.gas_claim;
+    const opportunity = deposit * model.opportunity_apy * (hold / 365);
+    return { net: expectedDrop - fees - opportunity, netLow: lowDrop - fees - opportunity, fees, opportunity };
+  };
+
   const rows = [...chosen.values()].map((p) => {
     const age = ageDays(snapshot.as_of, p.listed_at);
     const fittedLog = value.predict(p);
     const ifLaunches = 10 ** fittedLog;
-    const bandLow = ifLaunches * ev.band_p25;
-    const bandHigh = ifLaunches * ev.band_p75;
+    // The band is priced per category: this protocol's category band when
+    // its category has comparables, the global band otherwise.
+    const band = value.categoryBands.get(p.category ?? 'Uncategorized') ?? { p25: ev.band_p25, p75: ev.band_p75 };
+    const bandLow = ifLaunches * band.p25;
+    const bandHigh = ifLaunches * band.p75;
     const oddsValue = odds.predict(p);
     const implied = Math.max(1, Math.round(ifLaunches * oddsValue));
 
@@ -968,14 +1255,54 @@ export function buildBoard(
     const farmers = Math.min(model.max_farmers, Math.max(model.min_farmers, Math.round(p.tvl_usd / model.tvl_per_farmer)));
     const dropPool = ifLaunches * model.drop_share;
     const expectedDrop = (dropPool / farmers) * oddsValue;
-    const gas = deposit >= 150 ? model.gas_large : model.gas_small;
-    const fees = gas + model.gas_weekly * Math.ceil(hold / 7) + model.gas_claim;
-    const opportunity = deposit * model.opportunity_apy * (hold / 365);
-    const net = expectedDrop - fees - opportunity;
-    const netLow = (bandLow * model.drop_share / farmers) * oddsValue - fees - opportunity;
+    const lowDrop = (bandLow * model.drop_share / farmers) * oddsValue;
+    const std = netAt(deposit, expectedDrop, lowDrop, hold);
+    const net = std.net;
+    const netLow = std.netLow;
+    const fees = std.fees;
+    const opportunity = std.opportunity;
     const verdict: BoardRow['verdict'] = netLow > 0 ? 'FARM' : net > 0 ? 'MARGINAL' : 'SKIP';
     const hours = 0.5 + (hold / 7) * (10 / 60) + 0.2;
     const breakeven = (fees + opportunity) / (model.drop_share / farmers * oddsValue);
+
+    // The deposit tiers: the same economics at $50, $150 and $500.
+    const tiers: FarmTier[] = [50, 150, 500].map((d) => {
+      const t = netAt(d, expectedDrop, lowDrop, hold);
+      return {
+        deposit_usd: d,
+        net_usd: round2(t.net),
+        net_hour_usd: round2(t.net / hours),
+        verdict: t.netLow > 0 ? 'FARM' : t.net > 0 ? 'MARGINAL' : 'SKIP',
+      };
+    });
+
+    // The largest deposit that still pays: net falls with the deposit (the
+    // opportunity cost grows while the expected drop does not), so solve
+    // net = 0 for the deposit, in the gas tier the answer lands in.
+    const fixedFees = model.gas_weekly * Math.ceil(hold / 7) + model.gas_claim;
+    const rate = model.opportunity_apy * (hold / 365);
+    let maxViable: number | null = null;
+    if (rate > 0) {
+      let d = (expectedDrop - model.gas_small - fixedFees) / rate;
+      if (d >= 150) d = (expectedDrop - model.gas_large - fixedFees) / rate;
+      if (d > 0) maxViable = Math.min(100_000, Math.round(d));
+    }
+
+    // The anchors: the three nearest traded comparables, same category
+    // first, then nearest by size.
+    const logTvl = Math.log10(p.tvl_usd);
+    const anchors: Anchor[] = anchorPool
+      .map(({ c, logTvl: cl }) => ({ c, same: (c.category ?? 'Uncategorized') === (p.category ?? 'Uncategorized'), dist: Math.abs(cl - logTvl) }))
+      .sort((a, b) => (a.same === b.same ? a.dist - b.dist : a.same ? -1 : 1))
+      .slice(0, 3)
+      .map(({ c, same }) => ({
+        slug: c.slug,
+        name: c.name,
+        tvl_usd: c.tvl_usd,
+        mcap_usd: c.mcap_usd!,
+        mcap_tvl: round4(marketMultiple(c)!),
+        same_category: same,
+      }));
 
     const oddsFeat = odds.features(p);
     const breakdown: ModelBreakdown = {
@@ -985,6 +1312,8 @@ export function buildBoard(
       if_launches_usd: Math.round(ifLaunches),
       band_low_usd: Math.round(bandLow),
       band_high_usd: Math.round(bandHigh),
+      band_p25_factor: round4(band.p25),
+      band_p75_factor: round4(band.p75),
       odds: round4(oddsValue),
       odds_log_tvl: round4(oddsFeat.log_tvl),
       odds_log_age: round4(oddsFeat.log_age),
@@ -998,6 +1327,7 @@ export function buildBoard(
       opportunity_usd: round2(opportunity),
       hours: round2(hours),
       age_days: age,
+      hold_days: hold,
     };
     return {
       p,
@@ -1005,18 +1335,40 @@ export function buildBoard(
       ifLaunches,
       bandLow,
       bandHigh,
+      bandLowImplied: bandLow * oddsValue,
+      bandHighImplied: bandHigh * oddsValue,
       oddsValue,
       verdict,
       net,
       netLow,
       hours,
       breakeven,
+      maxViable,
+      tiers,
+      anchors,
       breakdown,
     };
   });
   rows.sort((a, b) => b.implied - a.implied || (a.p.slug < b.p.slug ? -1 : a.p.slug > b.p.slug ? 1 : 0));
-  return rows.map((r, i) => ({
+  // The rank range: how far a row could move if every band landed at its
+  // own end. The best rank counts the rows whose band low still beats this
+  // row's point estimate; the worst counts the rows whose band high reaches
+  // it. A row whose band overlaps nobody's keeps a range of one.
+  const rankRange = (r: (typeof rows)[number]): [number, number] => {
+    let low = 1;
+    let high = 0;
+    for (const o of rows) {
+      if (o.bandLowImplied > r.implied) low++;
+      if (o.bandHighImplied >= r.implied) high++;
+    }
+    return [low, Math.max(high, low)];
+  };
+  return rows.map((r, i) => {
+    const [rankLow, rankHigh] = rankRange(r);
+    return {
     rank: i + 1,
+    rank_low: rankLow,
+    rank_high: rankHigh,
     slug: r.p.slug,
     name: r.p.name,
     category: r.p.category,
@@ -1035,9 +1387,13 @@ export function buildBoard(
     net_usd: round2(r.net),
     net_hour_usd: round2(r.net / r.hours),
     breakeven_usd: Math.round(r.breakeven),
+    max_viable_deposit_usd: r.maxViable,
+    tiers: r.tiers,
+    anchors: r.anchors,
     model: r.breakdown,
-    farm_steps: farmSteps(r.p, r.breakdown.age_days, r.verdict, r.net, r.breakeven, r.breakdown.deposit_usd).map(stepText),
-  }));
+    farm_steps: farmSteps(r.p, r.breakdown.age_days, r.verdict, r.net, r.breakeven, r.breakdown.deposit_usd, r.tiers, r.maxViable).map(stepText),
+    };
+  });
 }
 
 /** The 758-protocol ledger: every protocol in exactly one group. */

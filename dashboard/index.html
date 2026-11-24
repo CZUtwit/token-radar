@@ -25,6 +25,7 @@
 
 <nav class="tabs" id="tabs">
   <button class="tab active" data-tab="board">Board</button>
+  <button class="tab" data-tab="matrix">Value × odds matrix</button>
   <button class="tab" data-tab="method">Method &amp; evidence</button>
   <button class="tab" data-tab="live">Live tokens</button>
 </nav>
@@ -82,7 +83,12 @@
       <tbody id="rows"></tbody>
     </table>
   </div>
-  <p class="note">Implied value = fitted launch value × token odds. The band is the model's P25–P75 from leave-one-out residuals. A farm verdict is net of gas and a 4% annual opportunity cost on the deposit, at the stated assumptions — see Method &amp; evidence. Data: DefiLlama protocols snapshot, 2026-11-14. Nothing here is financial advice.</p>
+  <p class="note">Implied value = fitted launch value × token odds. The band is the model's P25–P75, priced per category from that category's comparables. A farm verdict is net of gas and a 4% annual opportunity cost on the deposit, at the stated assumptions — see Method &amp; evidence. Data: DefiLlama protocols snapshot, 2026-11-14. Nothing here is financial advice.</p>
+</section>
+
+<section id="tab-matrix" hidden>
+  <p class="intro">Every ranked protocol on two axes: token odds against implied launch value. The crosshairs sit at the medians. Top right is the hunting ground — high value and likely to launch at all. Click a dot to open that protocol's detail.</p>
+  <div id="matrix"></div>
 </section>
 
 <section id="tab-method" hidden>
