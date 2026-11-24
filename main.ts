@@ -87,5 +87,7 @@ writeFileSync(join(out, 'dossier.json'), buildDossier(out, { text_max_bytes: TEX
 
 process.stdout.write(
   `token radar: ${snapshot.protocols.length} protocols, ${snapshot.watchlist.length} on the watchlist, ${board.length} rows scored (${radar.early_size} early, ${radar.above_floor_off_list} above the floor but off the list)\n` +
+    `token radar: model ${radar.model_version}: ${radar.value.comps} comps, LOO miss x${radar.value.ablation[2]!.loo_miss}, walk-forward x${radar.value.ablation[2]!.wf_miss}; odds Brier ${radar.odds.brier} vs base ${radar.odds.base_brier}\n` +
+    `token radar: verdicts ${radar.farm_count} FARM / ${radar.marginal_count} MARGINAL / ${radar.skip_count} SKIP; total implied $${radar.total_implied_usd.toLocaleString('en-US')}; checksum ${radar.checksum}\n` +
     `token radar: wrote ${join(out, 'board.json')}, ${join(out, 'data.js')}, ${join(out, 'dashboard')} (${dashFiles.length} files), ${join(out, 'screenshots')} (${shots.length} images) and ${join(out, 'dossier.json')}\n`,
 );

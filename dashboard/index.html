@@ -12,16 +12,21 @@
     <div class="mark">◉</div>
     <div>
       <h1>Token Launch Radar</h1>
-      <p class="sub">Every protocol whose token does not exist yet, ranked by what its launch would be worth.</p>
+      <p class="sub">Every protocol whose token does not exist yet, ranked by what its launch would be worth — fitted from the tokens that already trade, tested held-out, and priced with the odds of a launch at all.</p>
     </div>
   </div>
-  <div class="stats" id="stats"></div>
 </header>
+
+<div class="kpis" id="kpis"></div>
+<p class="formula" id="formula"></p>
+
+<div class="ledger" id="ledger"></div>
+<div class="integrity" id="integrity"></div>
 
 <nav class="tabs" id="tabs">
   <button class="tab active" data-tab="board">Board</button>
+  <button class="tab" data-tab="method">Method &amp; evidence</button>
   <button class="tab" data-tab="live">Live tokens</button>
-  <button class="tab" data-tab="method">How the model works</button>
 </nav>
 
 <section id="tab-board">
@@ -36,14 +41,27 @@
       <option value="500000000">$500M+ TVL</option>
       <option value="1000000000">$1B+ TVL</option>
     </select>
-    <label class="check"><input id="f-watch" type="checkbox"> Watchlist only</label>
     <select id="f-sort">
       <option value="implied">Sort: implied value</option>
       <option value="tvl">Sort: TVL</option>
+      <option value="odds">Sort: token odds</option>
+      <option value="net">Sort: net / hour</option>
       <option value="growth">Sort: 7-day growth</option>
       <option value="age">Sort: age</option>
       <option value="name">Sort: name</option>
     </select>
+  </div>
+  <div class="pills" id="pills-verdict">
+    <button class="pill active" data-v="">All verdicts</button>
+    <button class="pill" data-v="FARM">Farm</button>
+    <button class="pill" data-v="MARGINAL">Marginal</button>
+    <button class="pill" data-v="SKIP">Skip</button>
+  </div>
+  <div class="pills" id="pills-tier">
+    <button class="pill active" data-t="">All tiers</button>
+    <button class="pill" data-t="watch">Watchlist</button>
+    <button class="pill" data-t="early">Early, below the floor</button>
+    <button class="pill" data-t="offlist">Off-list, above the floor</button>
   </div>
   <p class="count" id="count"></p>
   <div id="detail"></div>
@@ -52,47 +70,32 @@
       <thead><tr>
         <th data-k="rank">#</th>
         <th data-k="name">Protocol</th>
-        <th data-k="category">Category</th>
-        <th data-k="chains">Chains</th>
         <th data-k="tvl" class="num">TVL</th>
         <th data-k="growth" class="num">7d</th>
-        <th data-k="age" class="num">Age</th>
-        <th data-k="implied" class="num">Implied value</th>
+        <th data-k="age" class="num">No-token age</th>
+        <th data-k="odds" class="num">Token odds</th>
+        <th data-k="launches" class="num">If it launches</th>
+        <th data-k="implied" class="num">Implied value · P25–P75</th>
+        <th data-k="verdict" class="num">Verdict · net of fees</th>
+        <th data-k="net" class="num">Net / hour</th>
       </tr></thead>
       <tbody id="rows"></tbody>
     </table>
   </div>
-  <p class="note">Implied value = TVL × the category's median market-cap/TVL multiple × growth × maturity × chain breadth. Open a row to see its own arithmetic. Data: DefiLlama protocols snapshot, 2026-11-14. Nothing here is financial advice.</p>
+  <p class="note">Implied value = fitted launch value × token odds. The band is the model's P25–P75 from leave-one-out residuals. A farm verdict is net of gas and a 4% annual opportunity cost on the deposit, at the stated assumptions — see Method &amp; evidence. Data: DefiLlama protocols snapshot, 2026-11-14. Nothing here is financial advice.</p>
+</section>
+
+<section id="tab-method" hidden>
+  <div class="method" id="method"></div>
 </section>
 
 <section id="tab-live" hidden>
-  <p class="intro">These protocols already have a token that trades, so the board shows the market's own value for them — never a model's guess. They are also the board's price source: each category's multiple is the median market-cap/TVL ratio of the live tokens in that category.</p>
+  <p class="intro">These protocols already have a token that trades, so the board shows the market's own value for them — never a model's guess. The clean ones among them are also the board's price source: the value model is fitted on the 91 traded protocols that pass the same exclusion rules, and the odds model is fitted on all 442 protocols the rules do not exclude.</p>
   <div class="tablewrap">
     <table>
       <thead><tr><th>#</th><th>Protocol</th><th>Category</th><th class="num">TVL</th><th class="num">Market cap</th><th class="num">Mcap / TVL</th><th class="num">7d</th></tr></thead>
       <tbody id="live-rows"></tbody>
     </table>
-  </div>
-</section>
-
-<section id="tab-method" hidden>
-  <div class="method">
-    <h2>How the model works</h2>
-    <p>The board ranks <strong id="m-rows"></strong> pre-token protocols from a sealed snapshot of every protocol DefiLlama tracks. A protocol is pre-token when the snapshot records no market cap, no CoinGecko id and no symbol for it. Wrapped, staked and bridged products, exchanges and versioned pools are left out: a wrapped token is not a protocol waiting on a launch of its own.</p>
-    <h3>The formula</h3>
-    <pre>implied = TVL × category multiple × growth × maturity × breadth
-
-category multiple = median(market cap / TVL) of the live-token
-                    protocols in the same category (3+ comps, else the
-                    global median), clamped to [0.05, 1.5]
-growth            = 1 + clamp(7-day TVL change, −50%, +100%) × 0.5
-maturity          = 0.6 + min(age in days, 1095) / 1095 × 0.4
-breadth           = 1 + min(chains − 1, 4) × 0.03</pre>
-    <p>Every input comes from the snapshot's own figures: TVL, seven-day growth, listing date and chains. No protocol name is ever special-cased — the same function scores every row, and each row's detail view shows its own numbers, so the arithmetic can be checked by hand. The code is <code>impliedValue</code> in <code>lib/model.ts</code>.</p>
-    <h3>Farm plans</h3>
-    <p>Each protocol gets six steps, built from its own record — its category, its chains, its TVL and its age. Every step states what it costs and how long it takes. Bigger protocols get a larger suggested position; younger ones get a longer hold, so the activity lands in more than one snapshot.</p>
-    <h3>About this radar</h3>
-    <p>This page is a static dashboard with no network: it renders from <code>data.js</code>, written by the same program that wrote <code>board.json</code>. The board covers all 40 protocols on the snapshot's watchlist, plus every other rankable pre-token protocol below the floor — including protocols above the $50M floor that the watchlist itself leaves out. The snapshot is frozen at 2026-11-14; the figures on this page are that day's, and a launch after it is not in the data.</p>
   </div>
 </section>
 
