@@ -1,4 +1,4 @@
-// Token Launch Radar — the model, radar-4 (token-radar-01).
+// Token Launch Radar — the model, radar-5 (token-radar-01).
 //
 // One sealed DefiLlama snapshot in, one ranked board out. The board ranks every
 // pre-token protocol the snapshot can rank: the whole watchlist, plus every
@@ -42,8 +42,11 @@
 // Each farm plan is costed, not just listed. The board states its assumptions:
 // farmers share 5% of the launch value; one farming wallet per $100k of TVL
 // (at least 1000 wallets); gas and a 4% annual opportunity cost on the deposit.
-// A row is FARM when its net stays positive at the low end of its band,
-// MARGINAL when it pays at the point estimate only, SKIP when it does not pay.
+// A row is FARM when its net stays positive at the low end of its band AND
+// pays at least $25 an hour there; MARGINAL when it pays at the point estimate
+// (or at the low end but under $25 an hour); SKIP when it does not pay. The
+// hourly bar is what keeps the verdicts a decision instead of a rubber stamp:
+// a plan that pays pennies an hour is not worth farming even when it pays.
 // Every row also shows its net at three deposit tiers ($50 / $150 / $500) and
 // the largest deposit that still pays, plus a week-by-week timeline.
 //
@@ -90,6 +93,8 @@ export interface ModelConstants {
   max_farmers: number;
   /** Annual opportunity cost on the deposit, as a fraction. */
   opportunity_apy: number;
+  /** A FARM verdict must pay at least this much an hour, at the low end of the band. */
+  hourly_bar_usd: number;
   /** Gas for the setup transactions on a large plan, in dollars. */
   gas_large: number;
   /** Gas for the setup transactions on a small plan, in dollars. */
@@ -114,6 +119,7 @@ export const MODEL: ModelConstants = {
   min_farmers: 1000,
   max_farmers: 100_000,
   opportunity_apy: 0.04,
+  hourly_bar_usd: 25,
   gas_large: 8,
   gas_small: 4,
   gas_weekly: 2,
@@ -126,7 +132,7 @@ export const MODEL: ModelConstants = {
 };
 
 /** The model's version label, shown on the dashboard. */
-export const MODEL_VERSION = 'radar-4';
+export const MODEL_VERSION = 'radar-5';
 
 /** How many live-token protocols the Live view carries, by market cap. */
 export const LIVE_ROWS = 24;
@@ -188,6 +194,11 @@ export interface ValueEvidence {
   /** Share of comparables whose real cap lands inside the printed band. */
   honesty_p25_p75: number;
   honesty_p10_p90: number;
+  /** Share of comparables priced within 2x / 3x of their real cap, leave-one-out. */
+  within_2x: number;
+  within_3x: number;
+  /** The flat median multiple's within-3x share, leave-one-out. */
+  flat_within_3x: number;
   ablation: AblationRow[];
 }
 
@@ -243,7 +254,14 @@ export interface ModelBreakdown {
   drop_pool_usd: number;
   expected_drop_usd: number;
   fees_usd: number;
+  /** The gas bill, split: setup, one action a week, and the claim. */
+  gas_setup_usd: number;
+  gas_weekly_usd: number;
+  gas_claim_usd: number;
   opportunity_usd: number;
+  /** Net at the low end of the band, and what that pays an hour. */
+  net_low_usd: number;
+  net_low_hour_usd: number;
   hours: number;
   age_days: number | null;
   hold_days: number;
@@ -310,6 +328,18 @@ export interface LiveRow {
   mcap_tvl: number | null;
 }
 
+/** A protocol the board does not rank, with the group it landed in and why. */
+export interface SetAsideRow {
+  slug: string;
+  name: string;
+  category: string | null;
+  chains: string[];
+  tvl_usd: number;
+  mcap_usd: number | null;
+  group: string;
+  detail: string;
+}
+
 /** Everything the dashboard needs. */
 export interface RadarData {
   as_of: string;
@@ -333,6 +363,8 @@ export interface RadarData {
   checksum: string;
   rows: BoardRow[];
   live: LiveRow[];
+  /** Every protocol the board does not rank, with its ledger group. */
+  setaside: SetAsideRow[];
 }
 
 /** Why a snapshot is not one this model can score. */
@@ -558,14 +590,19 @@ function wfMiss(comps: SnapshotProtocol[], feat: FeatureFn): number {
   return median(test.map((p) => missRatio(10 ** feat(p).reduce((s, x, k) => s + x * beta[k]!, 0), p.mcap_usd!)));
 }
 
-/** Leave-one-out median miss for the flat median multiple. */
-function looMissFlat(comps: SnapshotProtocol[]): number {
+/** Leave-one-out miss ratios for the flat median multiple, one per comparable. */
+function looMissesFlat(comps: SnapshotProtocol[]): number[] {
   const misses: number[] = [];
   for (let i = 0; i < comps.length; i++) {
     const rest = comps.filter((_, j) => j !== i);
     misses.push(missRatio(comps[i]!.tvl_usd * median(rest.map((p) => marketMultiple(p)!)), comps[i]!.mcap_usd!));
   }
-  return median(misses);
+  return misses;
+}
+
+/** Leave-one-out median miss for the flat median multiple. */
+function looMissFlat(comps: SnapshotProtocol[]): number {
+  return median(looMissesFlat(comps));
 }
 
 /** Walk-forward median miss for the flat median multiple. */
@@ -780,6 +817,14 @@ export function fitValueModel(snapshot: Snapshot): {
   const bandP90 = 10 ** quantile(looResiduals, 0.9);
   const inside = (lo: number, hi: number): number => looResiduals.filter((r) => r >= Math.log10(lo) && r <= Math.log10(hi)).length / looResiduals.length;
 
+  // Within-2x / within-3x shares: the same leave-one-out residuals as miss
+  // ratios, so the reader can see how often the model lands close, not just
+  // how far it lands on average. The flat multiple's within-3x share is the
+  // baseline the fitted model has to beat.
+  const looMisses = looResiduals.map((r) => 10 ** Math.abs(r));
+  const within = (k: number): number => looMisses.filter((m) => m <= k).length / looMisses.length;
+  const flatWithin3 = looMissesFlat(comps).filter((m) => m <= 3).length / comps.length;
+
   // Per-category bands: each category's own P25-P75 from its comparables'
   // residuals, shrunk toward the global band in log space. A category with
   // few comparables mostly keeps the global band; a well-stocked one mostly
@@ -826,6 +871,9 @@ export function fitValueModel(snapshot: Snapshot): {
     honesty_cat_band: round4(honestyCatBand),
     honesty_p25_p75: round4(inside(bandP25, bandP75)),
     honesty_p10_p90: round4(inside(bandP10, bandP90)),
+    within_2x: round4(within(2)),
+    within_3x: round4(within(3)),
+    flat_within_3x: round4(flatWithin3),
     ablation: [
       { term: 'flat median multiple', loo_miss: round2(flatLoo), kfold_miss: round2(flatKf), wf_miss: round2(flatWf), verdict: 'baseline' },
       { term: '+ size curve, in TVL', loo_miss: round2(sizeLoo), kfold_miss: round2(sizeKf), wf_miss: round2(sizeWf), verdict: 'kept' },
@@ -1152,6 +1200,8 @@ export function farmSteps(
   deposit: number,
   tiers: FarmTier[],
   maxViable: number | null,
+  netLow: number,
+  netLowHour: number,
 ): FarmStep[] {
   const chain = chainOf(p);
   const chain2 = secondChainOf(p);
@@ -1166,9 +1216,11 @@ export function farmSteps(
       : `Deposits above $${maxViable.toLocaleString('en-US')} stop paying: the opportunity cost eats the expected drop.`;
   const verdictLine =
     verdict === 'FARM'
-      ? `This plan pays even at the low end of the band: expected net $${net.toFixed(0)} on a $${deposit} deposit after fees.`
+      ? `This plan pays even at the low end of the band: expected net $${net.toFixed(0)} on a $${deposit} deposit after fees, at $${netLowHour.toFixed(0)} an hour there.`
       : verdict === 'MARGINAL'
-        ? `This plan pays at the point estimate only: expected net $${net.toFixed(0)} on a $${deposit} deposit after fees, and it loses at the low end of the band.`
+        ? netLow > 0
+          ? `This plan pays at the low end of the band but under $${MODEL.hourly_bar_usd} an hour there ($${netLowHour.toFixed(0)}/h), so it is marginal, not a farm: expected net $${net.toFixed(0)} on a $${deposit} deposit after fees.`
+          : `This plan pays at the point estimate only: expected net $${net.toFixed(0)} on a $${deposit} deposit after fees, and it loses at the low end of the band.`
         : `This plan does not pay at a $${deposit} deposit: expected net $${net.toFixed(0)} after fees. It pays only if the launch tops about $${breakeven >= 1_000_000 ? `${(breakeven / 1_000_000).toFixed(1)}M` : `${Math.round(breakeven).toLocaleString('en-US')}`}.`;
   return [
     {
@@ -1224,17 +1276,19 @@ export function buildBoard(
   const comps = cleanComps(snapshot);
   const anchorPool = comps.map((c) => ({ c, logTvl: Math.log10(c.tvl_usd) }));
 
-  /** Net of fees at one deposit, at the point estimate and at the low end of the band. */
+  /** Net of fees at one deposit, at the point estimate and at the low end of the band, with the gas bill split. */
   const netAt = (
     deposit: number,
     expectedDrop: number,
     lowDrop: number,
     hold: number,
-  ): { net: number; netLow: number; fees: number; opportunity: number } => {
-    const gas = deposit >= 150 ? model.gas_large : model.gas_small;
-    const fees = gas + model.gas_weekly * Math.ceil(hold / 7) + model.gas_claim;
+  ): { net: number; netLow: number; fees: number; gasSetup: number; gasWeekly: number; gasClaim: number; opportunity: number } => {
+    const gasSetup = deposit >= 150 ? model.gas_large : model.gas_small;
+    const gasWeekly = model.gas_weekly * Math.ceil(hold / 7);
+    const gasClaim = model.gas_claim;
+    const fees = gasSetup + gasWeekly + gasClaim;
     const opportunity = deposit * model.opportunity_apy * (hold / 365);
-    return { net: expectedDrop - fees - opportunity, netLow: lowDrop - fees - opportunity, fees, opportunity };
+    return { net: expectedDrop - fees - opportunity, netLow: lowDrop - fees - opportunity, fees, gasSetup, gasWeekly, gasClaim, opportunity };
   };
 
   const rows = [...chosen.values()].map((p) => {
@@ -1261,18 +1315,23 @@ export function buildBoard(
     const netLow = std.netLow;
     const fees = std.fees;
     const opportunity = std.opportunity;
-    const verdict: BoardRow['verdict'] = netLow > 0 ? 'FARM' : net > 0 ? 'MARGINAL' : 'SKIP';
     const hours = 0.5 + (hold / 7) * (10 / 60) + 0.2;
+    const netLowHour = netLow / hours;
+    // FARM takes both: the net stays positive at the low end of the band,
+    // and it pays the hourly bar there. A plan that pays pennies an hour is
+    // not worth farming even when it pays, so it lands in MARGINAL with the
+    // plans that pay at the point estimate only.
+    const verdict: BoardRow['verdict'] = netLow > 0 && netLowHour >= model.hourly_bar_usd ? 'FARM' : net > 0 ? 'MARGINAL' : 'SKIP';
     const breakeven = (fees + opportunity) / (model.drop_share / farmers * oddsValue);
 
-    // The deposit tiers: the same economics at $50, $150 and $500.
+    // The deposit tiers: the same economics at $50, $150 and $500, judged by the same rule.
     const tiers: FarmTier[] = [50, 150, 500].map((d) => {
       const t = netAt(d, expectedDrop, lowDrop, hold);
       return {
         deposit_usd: d,
         net_usd: round2(t.net),
         net_hour_usd: round2(t.net / hours),
-        verdict: t.netLow > 0 ? 'FARM' : t.net > 0 ? 'MARGINAL' : 'SKIP',
+        verdict: t.netLow > 0 && t.netLow / hours >= model.hourly_bar_usd ? 'FARM' : t.net > 0 ? 'MARGINAL' : 'SKIP',
       };
     });
 
@@ -1324,7 +1383,12 @@ export function buildBoard(
       drop_pool_usd: Math.round(dropPool),
       expected_drop_usd: round2(expectedDrop),
       fees_usd: round2(fees),
+      gas_setup_usd: std.gasSetup,
+      gas_weekly_usd: std.gasWeekly,
+      gas_claim_usd: std.gasClaim,
       opportunity_usd: round2(opportunity),
+      net_low_usd: round2(netLow),
+      net_low_hour_usd: round2(netLowHour),
       hours: round2(hours),
       age_days: age,
       hold_days: hold,
@@ -1341,6 +1405,7 @@ export function buildBoard(
       verdict,
       net,
       netLow,
+      netLowHour,
       hours,
       breakeven,
       maxViable,
@@ -1391,9 +1456,45 @@ export function buildBoard(
     tiers: r.tiers,
     anchors: r.anchors,
     model: r.breakdown,
-    farm_steps: farmSteps(r.p, r.breakdown.age_days, r.verdict, r.net, r.breakeven, r.breakdown.deposit_usd, r.tiers, r.maxViable).map(stepText),
+    farm_steps: farmSteps(r.p, r.breakdown.age_days, r.verdict, r.net, r.breakeven, r.breakdown.deposit_usd, r.tiers, r.maxViable, r.netLow, r.netLowHour).map(stepText),
     };
   });
+}
+
+/** The ledger's labels: each group, its name and why a protocol lands there. */
+const LEDGER_LABELS: Record<string, [string, string]> = {
+  'ranked-watchlist': ['Ranked · watchlist', 'on the house list'],
+  'ranked-early': ['Ranked · early, below the floor', 'pre-token, under $50M TVL'],
+  'ranked-offlist': ['Ranked · off-list, above the floor', 'pre-token, over $50M, not on the list'],
+  'priced-comp': ['Token trades · priced comp', 'a token with a market cap of $1M or more'],
+  'token-no-cap': ['Token recorded · no usable cap', 'has a token, no market cap of $1M or more'],
+  'out-bridge': ['Out · bridge', 'moves value, launches nothing of its own'],
+  'out-liquid-staking': ['Out · liquid staking', 'a staked-token product'],
+  'out-exchange': ['Out · exchange', 'an exchange or its product'],
+  'out-versioned-wrapped': ['Out · versioned or wrapped', 'a pool or a wrapped product'],
+};
+
+/**
+ * The ledger group one protocol lands in. Token first: a protocol that
+ * records a token is filed by its token, whatever its category; only a
+ * pre-token protocol can be out by rule. That is the house list's own order —
+ * the out groups count pre-token protocols only — and the ledger must match
+ * it, or the accounting disagrees with the list it claims to file.
+ */
+function ledgerGroupOf(p: SnapshotProtocol, ranked: Set<string>, watch: Set<string>, floorUsd: number): string {
+  if (ranked.has(p.slug)) {
+    if (watch.has(p.slug)) return 'ranked-watchlist';
+    if (p.tvl_usd >= floorUsd) return 'ranked-offlist';
+    return 'ranked-early';
+  }
+  if (!isPreToken(p)) {
+    return p.mcap_usd !== null && p.mcap_usd >= 1_000_000 ? 'priced-comp' : 'token-no-cap';
+  }
+  const reason = exclusionReason(p);
+  if (reason !== null) return `out-${reason}`;
+  // Unreachable: a pre-token protocol with no exclusion reason is rankable.
+  // Filed here only so the ledger still sums to the whole snapshot.
+  return 'token-no-cap';
 }
 
 /** The 758-protocol ledger: every protocol in exactly one group. */
@@ -1412,32 +1513,31 @@ export function buildLedger(snapshot: Snapshot, board: BoardRow[]): LedgerGroup[
     'out-versioned-wrapped': 0,
   };
   for (const p of snapshot.protocols) {
-    if (ranked.has(p.slug)) {
-      if (watch.has(p.slug)) groups['ranked-watchlist']!++;
-      else if (p.tvl_usd >= snapshot.floor_usd) groups['ranked-offlist']!++;
-      else groups['ranked-early']!++;
-      continue;
-    }
-    const reason = exclusionReason(p);
-    if (reason !== null) {
-      groups[`out-${reason}`]!++;
-      continue;
-    }
-    if (!isPreToken(p) && marketMultiple(p) !== null) groups['priced-comp']!++;
-    else groups['token-no-cap']!++;
+    groups[ledgerGroupOf(p, ranked, watch, snapshot.floor_usd)]!++;
   }
-  const labels: Record<string, [string, string]> = {
-    'ranked-watchlist': ['Ranked · watchlist', 'on the house list'],
-    'ranked-early': ['Ranked · early, below the floor', 'pre-token, under $50M TVL'],
-    'ranked-offlist': ['Ranked · off-list, above the floor', 'pre-token, over $50M, not on the list'],
-    'priced-comp': ['Token trades · priced comp', 'fitted the value model'],
-    'token-no-cap': ['Token recorded · no usable cap', 'has a token, no market cap to price from'],
-    'out-bridge': ['Out · bridge', 'moves value, launches nothing of its own'],
-    'out-liquid-staking': ['Out · liquid staking', 'a staked-token product'],
-    'out-exchange': ['Out · exchange', 'an exchange or its product'],
-    'out-versioned-wrapped': ['Out · versioned or wrapped', 'a pool or a wrapped product'],
-  };
-  return Object.entries(groups).map(([key, count]) => ({ key, label: labels[key]![0], count, detail: labels[key]![1] }));
+  return Object.entries(groups).map(([key, count]) => ({ key, label: LEDGER_LABELS[key]![0], count, detail: LEDGER_LABELS[key]![1] }));
+}
+
+/** Every protocol the board does not rank, with its ledger group and why. */
+export function setAsideRows(snapshot: Snapshot, board: BoardRow[]): SetAsideRow[] {
+  const ranked = new Set(board.map((r) => r.slug));
+  const watch = new Set(snapshot.watchlist);
+  return snapshot.protocols
+    .filter((p) => !ranked.has(p.slug))
+    .map((p) => {
+      const group = ledgerGroupOf(p, ranked, watch, snapshot.floor_usd);
+      return {
+        slug: p.slug,
+        name: p.name,
+        category: p.category,
+        chains: p.chains,
+        tvl_usd: p.tvl_usd,
+        mcap_usd: p.mcap_usd,
+        group,
+        detail: LEDGER_LABELS[group]![1],
+      };
+    })
+    .sort((a, b) => b.tvl_usd - a.tvl_usd || (a.slug < b.slug ? -1 : a.slug > b.slug ? 1 : 0));
 }
 
 /** The live-token protocols, by market cap, for the dashboard's Live view. */
@@ -1465,6 +1565,7 @@ export function buildRadar(snapshot: Snapshot, model: ModelConstants = MODEL): {
   const board = buildBoard(snapshot, value, odds, model);
   const live = liveRows(snapshot);
   const ledger = buildLedger(snapshot, board);
+  const setaside = setAsideRows(snapshot, board);
   const early = board.filter((r) => !snapshot.watchlist.includes(r.slug)).length;
   const aboveOff = board.filter((r) => !r.on_watchlist && r.tvl_usd >= snapshot.floor_usd).length;
   const checksum = checksumOf(JSON.stringify(board.map((r) => [r.slug, r.rank, r.implied_value_usd])));
@@ -1489,6 +1590,7 @@ export function buildRadar(snapshot: Snapshot, model: ModelConstants = MODEL): {
     checksum,
     rows: board,
     live,
+    setaside,
   };
   return { board, radar };
 }

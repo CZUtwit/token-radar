@@ -185,6 +185,15 @@ ol.farm .ct { color: var(--muted); font-size: 13px; }
 }
 .kpi b { display: block; font-size: 17px; font-variant-numeric: tabular-nums; }
 .kpi span { color: var(--muted); font-size: 12px; line-height: 1.4; display: block; margin-top: 2px; }
+.kpi .tag {
+  display: block;
+  margin: 0 0 2px;
+  color: var(--gold);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.8px;
+  text-transform: uppercase;
+}
 .formula {
   padding: 12px 28px 0;
   margin: 0;
@@ -296,3 +305,37 @@ table.evidence td:first-child { white-space: normal; }
 .legend { display: flex; flex-wrap: wrap; gap: 4px 16px; margin-top: 10px; font-size: 12px; color: var(--muted); }
 .legend .lg i { display: inline-block; width: 9px; height: 9px; border-radius: 2px; margin-right: 5px; vertical-align: -1px; }
 .legend .muted { color: var(--muted); }
+
+/* radar-5: scenario controls that re-price the verdicts */
+.scenario {
+  display: flex; gap: 18px; flex-wrap: wrap; align-items: center;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 10px 16px;
+  margin-bottom: 14px;
+}
+.sc-label { font-weight: 700; color: var(--gold); font-size: 13px; white-space: nowrap; }
+.scenario label { display: flex; gap: 8px; align-items: center; color: var(--muted); font-size: 13px; white-space: nowrap; }
+.scenario label span { color: var(--text); font-weight: 700; font-variant-numeric: tabular-nums; min-width: 76px; }
+.scenario select {
+  background: var(--panel2);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  color: var(--text);
+  font: inherit;
+  padding: 6px 9px;
+  cursor: pointer;
+}
+.scenario input[type="range"] { width: 130px; accent-color: var(--gold); cursor: pointer; }
+.sc-reset {
+  background: none;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  color: var(--muted);
+  font: inherit; font-size: 13px; font-weight: 600;
+  padding: 6px 13px;
+  cursor: pointer;
+}
+.sc-reset:hover { color: var(--text); border-color: var(--gold-dim); }
+.scenario-note { color: var(--gold); margin: 0 0 12px; font-size: 13px; }

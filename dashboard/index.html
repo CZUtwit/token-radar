@@ -28,9 +28,32 @@
   <button class="tab" data-tab="matrix">Value × odds matrix</button>
   <button class="tab" data-tab="method">Method &amp; evidence</button>
   <button class="tab" data-tab="live">Live tokens</button>
+  <button class="tab" data-tab="all">All 758</button>
 </nav>
 
 <section id="tab-board">
+  <div class="scenario" id="scenario">
+    <span class="sc-label">Re-price the verdicts</span>
+    <label>Deposit
+      <select id="sc-deposit">
+        <option value="">Row default</option>
+        <option value="50">$50</option>
+        <option value="100">$100</option>
+        <option value="150">$150</option>
+        <option value="250">$250</option>
+        <option value="500">$500</option>
+        <option value="1000">$1,000</option>
+      </select>
+    </label>
+    <label>Drop share <span id="sc-share-val">5%</span>
+      <input id="sc-share" type="range" min="1" max="10" step="0.5" value="5">
+    </label>
+    <label>Horizon <span id="sc-weeks-val">Row default</span>
+      <input id="sc-weeks" type="range" min="0" max="26" step="1" value="0">
+    </label>
+    <button class="sc-reset" id="sc-reset">Reset</button>
+  </div>
+  <p class="scenario-note" id="scenario-note" hidden></p>
   <div class="controls">
     <input id="q" type="search" placeholder="Search a protocol…" autocomplete="off">
     <select id="f-cat"><option value="">All categories</option></select>
@@ -83,7 +106,7 @@
       <tbody id="rows"></tbody>
     </table>
   </div>
-  <p class="note">Implied value = fitted launch value × token odds. The band is the model's P25–P75, priced per category from that category's comparables. A farm verdict is net of gas and a 4% annual opportunity cost on the deposit, at the stated assumptions — see Method &amp; evidence. Data: DefiLlama protocols snapshot, 2026-11-14. Nothing here is financial advice.</p>
+  <p class="note">Implied value = fitted launch value × token odds. The band is the model's P25–P75, priced per category from that category's comparables. A farm verdict is net of gas and a 4% annual opportunity cost on the deposit, and FARM takes both: the net stays positive at the low end of the band and pays at least $25 an hour there — see Method &amp; evidence. Data: DefiLlama protocols snapshot, 2026-11-14. Nothing here is financial advice.</p>
 </section>
 
 <section id="tab-matrix" hidden>
@@ -101,6 +124,21 @@
     <table>
       <thead><tr><th>#</th><th>Protocol</th><th>Category</th><th class="num">TVL</th><th class="num">Market cap</th><th class="num">Mcap / TVL</th><th class="num">7d</th></tr></thead>
       <tbody id="live-rows"></tbody>
+    </table>
+  </div>
+</section>
+
+<section id="tab-all" hidden>
+  <p class="intro">Every protocol the board does not rank — all 560 of them — with the group it landed in and why. A protocol that records a token is filed by its token, whatever its category; only a pre-token protocol can be out by rule.</p>
+  <div class="controls">
+    <input id="q-all" type="search" placeholder="Search a protocol…" autocomplete="off">
+    <select id="f-group"><option value="">All groups</option></select>
+  </div>
+  <p class="count" id="count-all"></p>
+  <div class="tablewrap">
+    <table>
+      <thead><tr><th>#</th><th>Protocol</th><th>Category</th><th class="num">TVL</th><th class="num">Market cap</th><th>Group</th><th>Why</th></tr></thead>
+      <tbody id="all-rows"></tbody>
     </table>
   </div>
 </section>

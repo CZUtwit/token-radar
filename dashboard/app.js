@@ -1,18 +1,62 @@
-// Token Launch Radar — the dashboard, radar-4. Renders window.RADAR (written
+// Token Launch Radar — the dashboard, radar-5. Renders window.RADAR (written
 // by main.ts from the same board as board.json) with no fetch and no network:
 // a KPI strip, the 758-protocol ledger, a self-check strip the browser
 // recomputes from the data, search and filters, sortable columns, a detail
 // view for every protocol with its own model arithmetic and costed farm plan,
-// a value-by-odds matrix, the method and evidence tab, and a Live view of the
-// traded tokens.
+// scenario controls that re-price every verdict live, a value-by-odds matrix,
+// the method and evidence tab, a Live view of the traded tokens, and an
+// All-758 view of every protocol the board does not rank.
 (function () {
   'use strict';
   var R = window.RADAR;
   if (!R) return;
 
-  var state = { q: '', cat: '', chain: '', minTvl: 0, verdict: '', tier: '', sort: 'implied', dir: -1, open: null };
+  var state = { q: '', cat: '', chain: '', minTvl: 0, verdict: '', tier: '', sort: 'implied', dir: -1, open: null, deposit: '', share: 5, weeks: 0, qAll: '', group: '' };
 
   function $(id) { return document.getElementById(id); }
+
+  /** Whether any scenario control has moved off the board's stated assumptions. */
+  function scenarioActive() {
+    return state.deposit !== '' || state.share !== 5 || state.weeks !== 0;
+  }
+
+  /**
+   * One row's farm economics under the current scenario: the deposit, drop
+   * share and horizon the reader picked, or the board's stated assumptions
+   * when nothing moved. With no scenario active this returns the row's own
+   * stored figures, so the default view is exactly board.json.
+   */
+  function scenarioEconomics(r) {
+    if (!scenarioActive()) {
+      return { deposit: r.model.deposit_usd, net: r.net_usd, netLow: r.model.net_low_usd, netHour: r.net_hour_usd, netLowHour: r.model.net_low_hour_usd, verdict: r.verdict, fees: r.model.fees_usd, gasSetup: r.model.gas_setup_usd, gasWeekly: r.model.gas_weekly_usd, gasClaim: r.model.gas_claim_usd, opportunity: r.model.opportunity_usd, expectedDrop: r.model.expected_drop_usd, hours: r.model.hours, breakeven: r.breakeven_usd };
+    }
+    var m = r.model;
+    var dep = state.deposit !== '' ? Number(state.deposit) : m.deposit_usd;
+    var share = state.share / 100;
+    var weeks = state.weeks !== 0 ? state.weeks : m.hold_days / 7;
+    var hold = weeks * 7;
+    var gasSetup = dep >= 150 ? R.model.gas_large : R.model.gas_small;
+    var gasWeekly = R.model.gas_weekly * Math.ceil(hold / 7);
+    var gasClaim = R.model.gas_claim;
+    var fees = gasSetup + gasWeekly + gasClaim;
+    var opportunity = dep * R.model.opportunity_apy * (hold / 365);
+    var expectedDrop = (r.if_launches_usd * share / m.farmers) * r.odds;
+    var lowDrop = expectedDrop * (r.band_low_usd / r.if_launches_usd);
+    var net = expectedDrop - fees - opportunity;
+    var netLow = lowDrop - fees - opportunity;
+    var hours = 0.5 + weeks * (10 / 60) + 0.2;
+    var netLowHour = netLow / hours;
+    var verdict = netLow > 0 && netLowHour >= R.model.hourly_bar_usd ? 'FARM' : net > 0 ? 'MARGINAL' : 'SKIP';
+    var breakeven = (fees + opportunity) / (share / m.farmers * r.odds);
+    return { deposit: dep, net: net, netLow: netLow, netHour: net / hours, netLowHour: netLowHour, verdict: verdict, fees: fees, gasSetup: gasSetup, gasWeekly: gasWeekly, gasClaim: gasClaim, opportunity: opportunity, expectedDrop: expectedDrop, hours: hours, breakeven: breakeven };
+  }
+
+  /** The board's verdict counts under the current scenario. */
+  function scenarioCounts() {
+    var c = { FARM: 0, MARGINAL: 0, SKIP: 0 };
+    R.rows.forEach(function (r) { c[scenarioEconomics(r).verdict]++; });
+    return c;
+  }
 
   /** $2.75B, $498.2M, $594.9K — one decimal, whole dollars in the detail view. */
   function money(n) {
@@ -75,22 +119,23 @@
     return n;
   }
 
-  /** The six KPI cards across the top of the page. */
+  /** The six KPI cards across the top of the page, each tagged with the question it answers. */
   function renderKpis() {
     var fit = fittedRow();
     var flat = R.value.ablation[0];
     var vKept = keptCount(R.value.ablation);
     var oKept = keptCount(R.odds.ablation);
+    var counts = scenarioCounts();
     var cards = [
-      { b: '×' + fit.loo_miss, s: 'out-of-sample miss, leave-one-out · ten-fold ×' + fit.kfold_miss + ' · flat multiple ×' + flat.loo_miss },
-      { b: '×' + fit.wf_miss, s: 'out-of-sample miss, walk-forward · flat multiple ×' + flat.wf_miss },
-      { b: R.odds.brier.toFixed(3) + ' vs ' + R.odds.base_brier.toFixed(3), s: 'token odds, Brier score vs base rate · ten-fold ' + R.odds.kfold_brier.toFixed(3) + ' · walk-forward ' + R.odds.wf_brier.toFixed(3) + ' vs ' + R.odds.wf_base_brier.toFixed(3) },
-      { b: vKept + ' of ' + (R.value.ablation.length - 2) + ' · ' + oKept + ' of ' + (R.odds.ablation.length - 1), s: 'terms that survived both held-out tests, value model · odds model' },
-      { b: R.farm_count + ' of ' + R.board_size, s: 'worth farming at the low end of the band · ' + R.marginal_count + ' marginal, ' + R.skip_count + ' skip' },
-      { b: R.watchlist_size + ' / ' + R.watchlist_size, s: 'watchlist ranked · plus ' + R.early_size + ' early and ' + R.above_floor_off_list + ' off-list' },
+      { tag: 'Value · held-out', b: '×' + fit.loo_miss, s: 'out-of-sample miss, leave-one-out · ' + (R.value.within_3x * 100).toFixed(1) + '% of peers priced within 3x (flat ' + (R.value.flat_within_3x * 100).toFixed(1) + '%) · flat multiple ×' + flat.loo_miss },
+      { tag: 'Value · walk-forward', b: '×' + fit.wf_miss, s: 'out-of-sample miss, walk-forward · flat multiple ×' + flat.wf_miss },
+      { tag: 'Odds · Brier', b: R.odds.brier.toFixed(3) + ' vs ' + R.odds.base_brier.toFixed(3), s: 'token odds, Brier score vs base rate · ten-fold ' + R.odds.kfold_brier.toFixed(3) + ' · walk-forward ' + R.odds.wf_brier.toFixed(3) + ' vs ' + R.odds.wf_base_brier.toFixed(3) },
+      { tag: 'Terms · survived', b: vKept + ' of ' + (R.value.ablation.length - 2) + ' · ' + oKept + ' of ' + (R.odds.ablation.length - 1), s: 'terms that survived both held-out tests, value model · odds model' },
+      { tag: 'Farm · costed', b: counts.FARM + ' of ' + R.board_size, s: 'worth farming: pays at the low end and $' + R.model.hourly_bar_usd + ' an hour there · ' + counts.MARGINAL + ' marginal, ' + counts.SKIP + ' skip' + (scenarioActive() ? ' · under your scenario' : '') },
+      { tag: 'Watchlist · covered', b: R.watchlist_size + ' / ' + R.watchlist_size, s: 'watchlist ranked · plus ' + R.early_size + ' early and ' + R.above_floor_off_list + ' off-list' },
     ];
     $('kpis').innerHTML = cards.map(function (c) {
-      return '<div class="kpi"><b>' + esc(c.b) + '</b><span>' + esc(c.s) + '</span></div>';
+      return '<div class="kpi"><span class="tag">' + esc(c.tag) + '</span><b>' + esc(c.b) + '</b><span>' + esc(c.s) + '</span></div>';
     }).join('');
     var co = R.value.coefficients;
     $('formula').textContent = 'Implied value = fitted launch value × token odds.  log10(market cap) = ' + co[0].toFixed(2) + ' + ' + co[1].toFixed(2) + ' × log10(TVL)' +
@@ -165,6 +210,7 @@
     }).join('');
     $('method').innerHTML =
       '<h2>How the model works</h2>' +
+      '<p>The board answers four questions, in order: is the watchlist covered, is the value fitted from the record, is it tested on rows it never saw, and is every farm plan costed? The KPI strip at the top answers all four at a glance; this page shows the evidence behind each answer.</p>' +
       '<p>The board ranks <strong>' + R.board_size + '</strong> pre-token protocols from a sealed snapshot of every protocol DefiLlama tracks. A protocol is pre-token when the snapshot records no market cap, no CoinGecko id and no symbol for it. Wrapped, staked and bridged products, exchanges and versioned pools are left out: a wrapped token is not a protocol waiting on a launch of its own.</p>' +
       '<h3>The formula</h3><pre>implied value = fitted launch value × token odds\n\nlog10(market cap) = ' + v.coefficients.map(function (c) { return c.toFixed(2); }).join('  ') + '\n  terms, in order: ' + v.terms.join(', ') + '\n  fitted on ' + v.comps + ' traded comparables (residual sd ' + v.residual_sd_log10 + ' in log10)\n\ntoken odds = logistic(log TVL, log age, category token rate, growth)\n  fitted on ' + o.peers + ' peers, ' + o.with_token + ' of which record a token\n  weights (standardized): ' + o.weights.map(function (w) { return w.toFixed(2); }).join(', ') + '</pre>' +
       '<p>Every coefficient is fitted on this snapshot and tested held-out. A term enters a model only when it lowers the combined held-out error by at least 1% without raising either test by more than 2%. The tables below show every term that was tried — including the ones that failed.</p>' +
@@ -172,6 +218,7 @@
       '<p>Median miss: how far the prediction lands from the real market cap, as a multiple. Leave-one-out refits the model 91 times, each time holding one comparable out; ten-fold refits it ten times on nine tenths each; walk-forward fits on the earlier listings and prices the later ones.</p>' +
       '<div class="tablewrap"><table class="evidence"><thead><tr><th>Term, added in order</th><th class="num">Leave-one-out</th><th class="num">Ten-fold</th><th class="num">Walk-forward</th><th>Verdict</th></tr></thead><tbody>' + vRows + '</tbody></table></div>' +
       '<p>Age, chain count and the category effect all failed: each one made at least one held-out test worse. The shuffled control — another protocol\'s growth, which cannot carry signal — failed too, which is what shows the tests can tell a real term from noise.</p>' +
+      '<p>How often the model lands close, not just how far it lands on average: ' + (v.within_3x * 100).toFixed(1) + '% of comparables are priced within 3x of their real market cap leave-one-out (' + (v.within_2x * 100).toFixed(1) + '% within 2x), against ' + (v.flat_within_3x * 100).toFixed(1) + '% within 3x for the flat median multiple.</p>' +
       '<h3>The band — priced per category</h3>' +
       '<p>Each row\'s P25–P75 band comes from its own category\'s comparables: the category\'s leave-one-out residuals, shrunk toward the global band (weight n / (n + 3)), so a thin category mostly keeps the global band and a well-stocked one mostly keeps its own. ' + (v.honesty_cat_band * 100).toFixed(0) + '% of real caps land inside their own category band (50% stated), against ' + (v.honesty_p25_p75 * 100).toFixed(0) + '% for the single global band.</p>' +
       '<div class="tablewrap"><table class="evidence"><thead><tr><th>Category</th><th class="num">Comparables</th><th class="num">P25 factor</th><th class="num">P75 factor</th></tr></thead><tbody>' + bandRows + '</tbody></table></div>' +
@@ -184,9 +231,9 @@
       '<h3>Farm economics — the stated assumptions</h3>' +
       '<ul><li>Farmers share ' + (R.model.drop_share * 100).toFixed(0) + '% of the launch value.</li>' +
       '<li>One farming wallet per $' + R.model.tvl_per_farmer.toLocaleString('en-US') + ' of TVL, at least ' + R.model.min_farmers.toLocaleString('en-US') + ' wallets.</li>' +
-      '<li>Gas for setup, weekly actions and the claim, plus a ' + (R.model.opportunity_apy * 100).toFixed(0) + '% annual opportunity cost on the deposit.</li>' +
-      '<li>A row is FARM when its net stays positive at the low end of its band, MARGINAL when it pays at the point estimate only, SKIP when it does not pay.</li></ul>' +
-      '<p>Change the assumptions and the verdicts change — the detail view shows the arithmetic for each row, so the verdict can be checked by hand.</p>' +
+      '<li>Gas for setup, weekly actions and the claim, plus a ' + (R.model.opportunity_apy * 100).toFixed(0) + '% annual opportunity cost on the deposit. The gas bill is split out in the detail view: setup, weekly actions, and the claim.</li>' +
+      '<li>A row is FARM when its net stays positive at the low end of its band <em>and</em> pays at least $' + R.model.hourly_bar_usd + ' an hour there; MARGINAL when it pays at the point estimate (or at the low end but under $' + R.model.hourly_bar_usd + ' an hour); SKIP when it does not pay. The hourly bar is what keeps the verdicts a decision instead of a rubber stamp.</li></ul>' +
+      '<p>Change the assumptions and the verdicts change — the scenario controls above the board re-price every verdict live, and the detail view shows the arithmetic for each row, so any verdict can be checked by hand.</p>' +
       '<h3>About this radar</h3>' +
       '<p>This page is a static dashboard with no network: it renders from <code>data.js</code>, written by the same program that wrote <code>board.json</code>. The board covers all ' + R.watchlist_size + ' protocols on the snapshot\'s watchlist, plus every other rankable pre-token protocol — including ' + R.above_floor_off_list + ' above the $50M floor that the watchlist itself leaves out. The snapshot is frozen at ' + R.as_of + '; the figures on this page are that day\'s, and a launch after it is not in the data.</p>';
   }
@@ -199,7 +246,7 @@
       if (state.cat && r.category !== state.cat) return false;
       if (state.chain && r.chains.indexOf(state.chain) === -1) return false;
       if (r.tvl_usd < state.minTvl) return false;
-      if (state.verdict && r.verdict !== state.verdict) return false;
+      if (state.verdict && scenarioEconomics(r).verdict !== state.verdict) return false;
       if (state.tier === 'watch' && !r.on_watchlist) return false;
       if (state.tier === 'early' && (r.on_watchlist || r.tvl_usd >= R.floor_usd)) return false;
       if (state.tier === 'offlist' && (r.on_watchlist || r.tvl_usd < R.floor_usd)) return false;
@@ -216,8 +263,8 @@
       else if (key === 'age') { va = a.age_days === null ? -1 : a.age_days; vb = b.age_days === null ? -1 : b.age_days; }
       else if (key === 'odds') { va = a.odds; vb = b.odds; }
       else if (key === 'launches') { va = a.if_launches_usd; vb = b.if_launches_usd; }
-      else if (key === 'verdict') { va = verdictRank[a.verdict]; vb = verdictRank[b.verdict]; }
-      else if (key === 'net') { va = a.net_hour_usd; vb = b.net_hour_usd; }
+      else if (key === 'verdict') { va = verdictRank[scenarioEconomics(a).verdict]; vb = verdictRank[scenarioEconomics(b).verdict]; }
+      else if (key === 'net') { va = scenarioEconomics(a).netHour; vb = scenarioEconomics(b).netHour; }
       else if (key === 'rank') { va = a.rank; vb = b.rank; }
       else { va = a.implied_value_usd; vb = b.implied_value_usd; }
       return dir * (va - vb);
@@ -237,7 +284,8 @@
     var html = rows.map(function (r) {
       var w = Math.max(2, Math.round((r.implied_value_usd / max) * 100));
       var ow = Math.max(2, Math.round(r.odds * 100));
-      var netCls = r.net_usd >= 0 ? 'up' : 'down';
+      var se = scenarioEconomics(r);
+      var netCls = se.net >= 0 ? 'up' : 'down';
       return '<tr data-slug="' + esc(r.slug) + '"' + (state.open === r.slug ? ' class="open"' : '') + '>' +
         '<td class="rank">' + r.rank + '<br><span class="rankrange">' + r.rank_low + '–' + r.rank_high + '</span></td>' +
         '<td><span class="pname">' + esc(r.name) + (r.on_watchlist ? '<span class="wl">Watchlist</span>' : '') + '</span><br><span class="cat">' + esc(r.category || '—') + '</span></td>' +
@@ -247,13 +295,14 @@
         '<td class="num"><span class="odds">' + Math.round(r.odds * 100) + '%</span><div class="bar"><i class="oddsbar" style="width:' + ow + '%"></i></div></td>' +
         '<td class="num">' + money(r.if_launches_usd) + '</td>' +
         '<td class="num"><span class="imp">' + money(r.implied_value_usd) + '</span><br><span class="band">' + money(r.band_low_usd) + '–' + money(r.band_high_usd) + '</span><div class="bar"><i style="width:' + w + '%"></i></div></td>' +
-        '<td class="num">' + verdictPill(r.verdict) + '<br><span class="' + netCls + '">' + signedMoney(r.net_usd) + ' net</span></td>' +
-        '<td class="num ' + netCls + '">' + signedMoney(r.net_hour_usd) + '/h</td>' +
+        '<td class="num">' + verdictPill(se.verdict) + '<br><span class="' + netCls + '">' + signedMoney(se.net) + ' net</span></td>' +
+        '<td class="num ' + netCls + '">' + signedMoney(se.netHour) + '/h</td>' +
         '</tr>';
     }).join('');
     $('rows').innerHTML = html || '<tr><td colspan="10" class="cat">No protocol matches these filters.</td></tr>';
+    var counts = scenarioCounts();
     $('count').textContent = 'Showing ' + rows.length + ' of ' + R.rows.length + ' pre-token protocols · snapshot ' + R.as_of + ' · model ' + R.model_version +
-      ' · ' + R.farm_count + ' farm / ' + R.marginal_count + ' marginal / ' + R.skip_count + ' skip';
+      ' · ' + counts.FARM + ' farm / ' + counts.MARGINAL + ' marginal / ' + counts.SKIP + ' skip' + (scenarioActive() ? ' · under your scenario' : '');
   }
 
   /** The detail view: the protocol's own numbers, its model arithmetic, its farm economics, its farm plan. */
@@ -264,6 +313,7 @@
     for (var i = 0; i < R.rows.length; i++) if (R.rows[i].slug === state.open) { r = R.rows[i]; break; }
     if (!r) { box.innerHTML = ''; return; }
     var m = r.model;
+    var se = scenarioEconomics(r);
     var steps = r.farm_steps.map(function (s) {
       var parts = s.split(' Cost: ');
       var action = parts[0];
@@ -281,7 +331,7 @@
     box.innerHTML =
       '<div class="detail">' +
       '<button class="close" id="d-close">Close ✕</button>' +
-      '<h2>#' + r.rank + ' <span class="rankrange-lg">rank range ' + r.rank_low + '–' + r.rank_high + '</span> ' + esc(r.name) + ' ' + verdictPill(r.verdict) + '</h2>' +
+      '<h2>#' + r.rank + ' <span class="rankrange-lg">rank range ' + r.rank_low + '–' + r.rank_high + '</span> ' + esc(r.name) + ' ' + verdictPill(se.verdict) + '</h2>' +
       '<p class="meta">' + esc(r.category || 'Uncategorized') + ' · ' + esc(r.chains.join(', ') || '—') +
       ' · TVL ' + moneyFull(r.tvl_usd) + ' · 7d ' + (r.change_7d === null ? '—' : (r.change_7d > 0 ? '+' : '') + r.change_7d.toFixed(2) + '%') +
       ' · no token for ' + ageText(r.age_days) + ' · ' + tier + '</p>' +
@@ -300,17 +350,20 @@
       '<div><span>category token rate</span><span>' + (m.odds_cat_rate * 100).toFixed(1) + '%</span></div>' +
       '<div><span>7-day growth</span><span>' + (m.odds_growth * 100).toFixed(1) + '%</span></div>' +
       '</div>' +
-      '<h3>Farm economics — $' + m.deposit_usd + ' deposit</h3><div class="math">' +
-      '<div><span>Drop pool (5% of launch)</span><span>' + moneyFull(m.drop_pool_usd) + '</span></div>' +
+      '<h3>Farm economics — $' + se.deposit + ' deposit' + (scenarioActive() ? ' · your scenario' : '') + '</h3><div class="math">' +
+      '<div><span>Drop pool (' + (scenarioActive() ? state.share + '%' : (R.model.drop_share * 100) + '%') + ' of launch)</span><span>' + moneyFull(Math.round(r.if_launches_usd * (scenarioActive() ? state.share / 100 : R.model.drop_share))) + '</span></div>' +
       '<div><span>Farming wallets assumed</span><span>' + m.farmers.toLocaleString('en-US') + '</span></div>' +
-      '<div><span>Expected drop, odds-weighted</span><span>' + signedMoney(m.expected_drop_usd) + '</span></div>' +
-      '<div><span>Fees (gas)</span><span>−$' + m.fees_usd.toFixed(0) + '</span></div>' +
-      '<div><span>Opportunity cost</span><span>−$' + m.opportunity_usd.toFixed(2) + '</span></div>' +
-      '<div class="total"><span>Net · ' + signedMoney(r.net_hour_usd) + ' / hour over ' + m.hours + 'h</span><span>' + signedMoney(r.net_usd) + '</span></div>' +
-      '<div><span>Break-even launch value</span><span>' + moneyFull(r.breakeven_usd) + '</span></div>' +
+      '<div><span>Expected drop, odds-weighted</span><span>' + signedMoney(se.expectedDrop) + '</span></div>' +
+      '<div><span>Gas — setup</span><span>−$' + se.gasSetup.toFixed(0) + '</span></div>' +
+      '<div><span>Gas — weekly actions</span><span>−$' + se.gasWeekly.toFixed(0) + '</span></div>' +
+      '<div><span>Gas — claim</span><span>−$' + se.gasClaim.toFixed(0) + '</span></div>' +
+      '<div><span>Opportunity cost</span><span>−$' + se.opportunity.toFixed(2) + '</span></div>' +
+      '<div class="total"><span>Net · ' + signedMoney(se.netHour) + ' / hour over ' + se.hours.toFixed(1) + 'h</span><span>' + signedMoney(se.net) + '</span></div>' +
+      '<div><span>Net at the low end · ' + signedMoney(se.netLowHour) + ' / hour</span><span>' + signedMoney(se.netLow) + '</span></div>' +
+      '<div><span>Break-even launch value</span><span>' + moneyFull(Math.round(se.breakeven)) + '</span></div>' +
       '<div><span>Largest deposit that still pays</span><span>' + (r.max_viable_deposit_usd === null ? 'none pays' : moneyFull(r.max_viable_deposit_usd)) + '</span></div>' +
       '</div>' +
-      '<h3>Net by deposit tier</h3>' +
+      '<h3>Net by deposit tier — board assumptions</h3>' +
       '<div class="tablewrap"><table class="evidence"><thead><tr><th class="num">Deposit</th><th class="num">Net</th><th class="num">Net / hour</th><th>Verdict</th></tr></thead><tbody>' + tiers + '</tbody></table></div>' +
       '</div>' +
       '<div><h3>Farm plan — seven steps</h3><ol class="farm">' + steps + '</ol></div>' +
@@ -356,7 +409,7 @@
     s += '<text x="14" y="' + ((H - B + T) / 2) + '" class="axis" text-anchor="middle" transform="rotate(-90 14 ' + ((H - B + T) / 2) + ')">Implied value (log)</text>';
     rows.forEach(function (r) {
       s += '<circle data-slug="' + esc(r.slug) + '" cx="' + x(r.odds).toFixed(1) + '" cy="' + y(Math.log10(r.implied_value_usd)).toFixed(1) +
-        '" r="' + (r.rank <= 5 ? 7 : 5) + '" fill="' + col[r.verdict] + '" class="dot"><title>' + esc(r.name) + ' — #' + r.rank + ', ' + money(r.implied_value_usd) + ', ' + Math.round(r.odds * 100) + '% odds, ' + r.verdict + '</title></circle>';
+        '" r="' + (r.rank <= 5 ? 7 : 5) + '" fill="' + col[scenarioEconomics(r).verdict] + '" class="dot"><title>' + esc(r.name) + ' — #' + r.rank + ', ' + money(r.implied_value_usd) + ', ' + Math.round(r.odds * 100) + '% odds, ' + scenarioEconomics(r).verdict + '</title></circle>';
     });
     rows.slice(0, 3).forEach(function (r) {
       s += '<text x="' + (x(r.odds) + 10) + '" y="' + (y(Math.log10(r.implied_value_usd)) + 4) + '" class="dotlabel">' + esc(r.name) + '</text>';
@@ -368,7 +421,7 @@
       c.addEventListener('click', function () {
         state.open = c.getAttribute('data-slug');
         document.querySelectorAll('#tabs .tab').forEach(function (b) { b.classList.toggle('active', b.getAttribute('data-tab') === 'board'); });
-        ['board', 'matrix', 'method', 'live'].forEach(function (t) { $('tab-' + t).hidden = t !== 'board'; });
+        ['board', 'matrix', 'method', 'live', 'all'].forEach(function (t) { $('tab-' + t).hidden = t !== 'board'; });
         refresh();
         $('detail').scrollIntoView({ behavior: 'smooth', block: 'start' });
       });
@@ -389,6 +442,28 @@
     $('live-rows').innerHTML = html;
   }
 
+  /** The All 758 view: every protocol the board does not rank, with its group and why. */
+  function renderSetAside() {
+    var q = state.qAll.trim().toLowerCase();
+    var rows = R.setaside.filter(function (r) {
+      if (state.group && r.group !== state.group) return false;
+      if (q && r.name.toLowerCase().indexOf(q) === -1 && r.slug.indexOf(q) === -1) return false;
+      return true;
+    });
+    var labels = {};
+    R.ledger.forEach(function (g) { labels[g.key] = g.label; });
+    $('all-rows').innerHTML = rows.map(function (r, i) {
+      return '<tr><td class="rank">' + (i + 1) + '</td>' +
+        '<td><span class="pname">' + esc(r.name) + '</span></td>' +
+        '<td class="cat">' + esc(r.category || '—') + '</td>' +
+        '<td class="num">' + money(r.tvl_usd) + '</td>' +
+        '<td class="num">' + money(r.mcap_usd) + '</td>' +
+        '<td>' + esc(labels[r.group] || r.group) + '</td>' +
+        '<td class="cat">' + esc(r.detail) + '</td></tr>';
+    }).join('') || '<tr><td colspan="7" class="cat">No protocol matches these filters.</td></tr>';
+    $('count-all').textContent = 'Showing ' + rows.length + ' of ' + R.setaside.length + ' protocols the board does not rank';
+  }
+
   /** Fill the category and chain dropdowns from the board itself. */
   function fillFilters() {
     var cats = {}, chains = {};
@@ -403,6 +478,11 @@
     var chSel = $('f-chain');
     Object.keys(chains).sort().forEach(function (c) {
       var o = document.createElement('option'); o.value = c; o.textContent = c; chSel.appendChild(o);
+    });
+    var gSel = $('f-group');
+    R.ledger.forEach(function (g) {
+      if (g.key.indexOf('ranked') === 0) return;
+      var o = document.createElement('option'); o.value = g.key; o.textContent = g.label + ' (' + g.count + ')'; gSel.appendChild(o);
     });
   }
 
@@ -461,9 +541,43 @@
     btn.addEventListener('click', function () {
       document.querySelectorAll('#tabs .tab').forEach(function (b) { b.classList.remove('active'); });
       btn.classList.add('active');
-      ['board', 'matrix', 'method', 'live'].forEach(function (t) { $('tab-' + t).hidden = t !== btn.getAttribute('data-tab'); });
+      ['board', 'matrix', 'method', 'live', 'all'].forEach(function (t) { $('tab-' + t).hidden = t !== btn.getAttribute('data-tab'); });
     });
   });
+
+  /** The scenario note under the controls, and everything a scenario change re-renders. */
+  function renderScenarioNote() {
+    var note = $('scenario-note');
+    if (!scenarioActive()) { note.hidden = true; note.textContent = ''; return; }
+    var parts = [];
+    if (state.deposit !== '') parts.push('$' + Number(state.deposit).toLocaleString('en-US') + ' deposit');
+    if (state.share !== 5) parts.push(state.share + '% drop share');
+    if (state.weeks !== 0) parts.push(state.weeks + ' weeks');
+    note.hidden = false;
+    note.textContent = 'Scenario: ' + parts.join(' · ') + ' — every verdict re-priced under your assumptions; ranks never move.';
+  }
+
+  function scenarioChanged() {
+    $('sc-share-val').textContent = state.share + '%';
+    $('sc-weeks-val').textContent = state.weeks === 0 ? 'Row default' : state.weeks + ' wk';
+    renderScenarioNote();
+    renderKpis();
+    renderBoard();
+    renderDetail();
+    renderMatrix();
+  }
+
+  $('sc-deposit').addEventListener('change', function (e) { state.deposit = e.target.value; scenarioChanged(); });
+  $('sc-share').addEventListener('input', function (e) { state.share = Number(e.target.value); scenarioChanged(); });
+  $('sc-weeks').addEventListener('input', function (e) { state.weeks = Number(e.target.value); scenarioChanged(); });
+  $('sc-reset').addEventListener('click', function () {
+    state.deposit = ''; state.share = 5; state.weeks = 0;
+    $('sc-deposit').value = ''; $('sc-share').value = '5'; $('sc-weeks').value = '0';
+    scenarioChanged();
+  });
+
+  $('q-all').addEventListener('input', function (e) { state.qAll = e.target.value; renderSetAside(); });
+  $('f-group').addEventListener('change', function (e) { state.group = e.target.value; renderSetAside(); });
 
   fillFilters();
   renderKpis();
@@ -472,5 +586,6 @@
   renderMethod();
   renderMatrix();
   renderLive();
+  renderSetAside();
   renderBoard();
 })();
